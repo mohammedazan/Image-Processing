@@ -1,6 +1,3 @@
-تفضل — هنا الملف كامل بصيغة **Markdown** جاهز تنسخه وتلزقو في `README.md`. كلشي متضمن (badges, جداول، أكواد أمثلة، مخططات). انسخ كل المحتوى بين الـ `markdown ` و دخّلو فـ README ديالك.
-
-````markdown
 # Tree Species Classification — TRAITEMENT DES DONNEES MULTIMEDIA
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
@@ -143,6 +140,7 @@ Training specifics:
 - Loss: Cross-entropy with class weights (to handle imbalance).
 
 ## Bonus & Ensembling
+
 - **Stacking:** Use predictions of multiple pipelines as meta-features for an ensemble classifier.
 - **Model averaging:** Soft-vote across top-performing models for robustness.
 
@@ -183,113 +181,3 @@ project_root/
 ├─ results/                # metrics, plots, confusion matrices
 ├─ requirements.txt
 └─ README.md
-````
-
----
-
-# Quick Start & Example Commands
-
-**1. Setup environment**
-
-```bash
-python -m venv .venv
-source .venv/bin/activate        # or .venv\Scripts\activate on Windows
-pip install -r requirements.txt
-```
-
-**2. Prepare data artifacts (one-time)**
-
-```bash
-# convert and cache processed artifacts (FPS sampling, views, descriptors)
-python src/preprocessing/prepare_all.py --raw_dir data/raw --out_dir data/processed --npoints 1024 --views 12
-```
-
-**3. Train a baseline (3D descriptors + RandomForest)**
-
-```bash
-python src/train.py --method descriptors_rf --data_dir data/processed --out experiments/desc_rf
-```
-
-**4. Train Multi-view + ResNet50 (fine-tune)**
-
-```bash
-python src/train.py --method multiview_resnet --backbone resnet50 --views 12 --epochs 80 --batch 32 --out experiments/mv_resnet
-```
-
-**5. Train PointNet (direct)**
-
-```bash
-python src/train.py --method pointnet --npoints 1024 --epochs 120 --batch 32 --out experiments/pointnet
-```
-
-**6. Evaluate trained model**
-
-```bash
-python src/eval.py --checkpoint experiments/pointnet/checkpoint.pth --data_dir data/processed --test_csv data/test.csv --out results/pointnet_eval
-```
-
----
-
-# Design Diagrams & Flowcharts
-
-**High-level pipeline (Mermaid flowchart)**
-
-```mermaid
-flowchart TD
-  A[Raw point clouds] --> B[Preprocessing]
-  B --> B1[Sampling (FPS N=1024)]
-  B --> B2[Render multi-views (V=12)]
-  B --> B3[3D Descriptors (FPFH/VFH)]
-  B1 --> C1[PointNet / DGCNN]
-  B2 --> C2[CNN (ResNet / EfficientNet)]
-  B3 --> C3[RandomForest / XGBoost / SVM]
-  C1 --> Z[Evaluation]
-  C2 --> Z
-  C3 --> Z
-  Z --> OUT[metrics + confusion matrix + saved artifacts]
-```
-
-**Data flow (simple ASCII diagram)**
-
-```
-raw .ply/.pcd --> preprocess --> processed/
-                       |--> sampled_points/ (pointnet inputs)
-                       |--> views/.png/ (multi-view inputs)
-                       |--> descriptors/ (FPFH, VFH vectors)
-```
-
----
-
-# Reproducibility & Experiments Logging
-
-* **Random seeds**: All scripts set global seeds (Python, NumPy, PyTorch) and log them to `experiments/<id>/seed.txt`.
-* **Checkpoints**: Save model weights and optimizer states every `k` epochs.
-* **Config files**: Each run uses a YAML config saved in `experiments/<id>/config.yaml`.
-* **Metrics**: Save per-epoch metrics to `experiments/<id>/metrics.csv` and final metrics to `results/`.
-* **Logging**: Support TensorBoard logging and optional Weights & Biases (WandB) integration.
-
----
-
-# Best Practices & Tips
-
-1. **Cache expensive artifacts** (rendered views, descriptors) — rendering on-the-fly is costly.
-2. **Start with light-weight baselines** (3D descriptors + RandomForest) to verify the pipeline quickly before expensive deep training.
-3. **Use stratified sampling** to keep class distribution consistent across splits.
-4. **Monitor class-wise metrics** — global accuracy can be misleading with unbalanced classes.
-5. **Limit augmentation strength** for species with subtle shape differences (over-augmentation can wash discriminative cues).
-6. **Keep experiments modular**: separate data transformation, model, training loop, and evaluation code.
-
----
-
-# License & Acknowledgements
-
-This project follows an open academic-minded license. Place a license file (e.g. MIT) at repository root if required.
-
----
-
-*Ready to run — if you want, I can now generate the `prepare_all.py` script and a baseline `train.py` for the descriptors RandomForest pipeline so you can start processing the data immediately.*
-
-```
-
-بغيت نعاونوك تولّد السكربت `prepare_all.py` ولا `train.py` باش تبدأ الخدمة دابا؟ ولا نعاود نعدّل README ولا نترجم شي جزء؟
-```
