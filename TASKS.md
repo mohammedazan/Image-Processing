@@ -159,4 +159,4 @@
 - من بعد ما يكونو outputs موجودين (manifest updated)، Imad يقدر يدير C1 (BernoulliNB) على features binarized بينما Mohamed يخدم على PointNet (C2).  
 - إلا بغيتي، نولّدلك باش نبدأ: `prepare_all.py`, `extract_3d_pca_features.py`, `extract_2d_hu.py`, و `train_bernoulli_nb.py` جاهزين للّصق — قول فقط نولّدهم دابا.
 
-*إذا موافق، نقدر نصدّر هاد TASKS.md مباشرة فـrepo أو نفتح لك issues جاهزين لكل مهمة.*  
+*إذا موافق، نقدر نصدّر هاد TASKS.md مباشرة فـrepo أو نفتح لك issues جاهزين لكل مهمة.*
