@@ -6,9 +6,9 @@ Preprocessing script for the "Tree Species Classification" project.
 
 Usage examples:
   Debug / fast run:
-    python prepare_all.py --raw_dir "Dataset/dataverse_files" --out_dir data/processed --npoints 1024 --fast --workers 2
+    python prepare_all.py --raw_dir "Dataset/dataverse_files" --out_dir .../../../../data/processed --npoints 1024 --fast --workers 2
   Full run:
-    python prepare_all.py --raw_dir "Dataset/dataverse_files" --out_dir data/processed --npoints 1024 --workers 8
+    python prepare_all.py --raw_dir "Dataset/dataverse_files" --out_dir .../../../../data/processed --npoints 1024 --workers 8
 
 This script:
  - Reads point clouds from supported formats (.ply, .pcd, .xyz, .txt, .npy, .pts)
@@ -58,8 +58,8 @@ except Exception:
     _HAS_OPEN3D = False
 
 # Constants / sensible defaults
-DEFAULT_RAW_DIR = Path("../../Dataset/dataverse_files")
-DEFAULT_OUT_DIR = Path("data/processed")
+DEFAULT_RAW_DIR = Path("../../data/raw/dataverse_files")
+DEFAULT_OUT_DIR = Path(".../../../../data/processed")
 DEFAULT_NPOINTS = 1024
 DEFAULT_WORKERS = 4
 DEFAULT_SEED = 42

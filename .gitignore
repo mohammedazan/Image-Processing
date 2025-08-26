@@ -1,3 +1,4 @@
 # .gitignore
 .venv/
 data/raw/
+data/processed/

@@ -5,9 +5,9 @@ Exploratory Data Analysis for Tree Species Classification.
 
 Usage examples:
   Debug (fast) using processed samples:
-    python eda.py --processed_dir data/processed/sampled --out_dir reports --fast
+    python eda.py --processed_dir .../../../../data/processed/sampled --out_dir ../../reports --fast
   Full run on raw dataset:
-    python eda.py --raw_dir Dataset/dataverse_files --out_dir reports
+    python eda.py --raw_dir ../../data/raw/dataverse_files --out_dir ../../reports  
 
 This script automatically chooses processed mode if --processed_dir exists and contains .npy files;
 otherwise it falls back to raw mode scanning --raw_dir recursively.
@@ -55,18 +55,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("eda")
 
 SUPPORTED_EXTS = {".npy", ".ply", ".pcd", ".xyz", ".txt", ".pts"}
-DEFAULT_RAW_DIR = Path("../../Dataset/dataverse_files")
-DEFAULT_PROCESSED_DIR = Path("../preprocessing/data/processed/sampled")
-DEFAULT_OUT_DIR = Path("reports")
+DEFAULT_RAW_DIR = Path("../../data/raw/dataverse_files")
+DEFAULT_PROCESSED_DIR = Path(".../../../../data/processed/sampled")
+DEFAULT_OUT_DIR = Path("../../reports")
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="EDA for Tree Species Classification")
     p.add_argument("--raw_dir", type=str, default=str(DEFAULT_RAW_DIR),
-                   help="Raw dataset root with class subfolders (default: Dataset/dataverse_files/)")
+                   help="Raw dataset root with class subfolders (default: ../../data/raw/dataverse_files)")
     p.add_argument("--processed_dir", type=str, default=str(DEFAULT_PROCESSED_DIR),
-                   help="Directory with processed sampled .npy point clouds (preferred, default: data/processed/sampled/)")
-    p.add_argument("--out_dir", type=str, default=str(DEFAULT_OUT_DIR), help="Output directory for reports (default: reports/)")
+                   help="Directory with processed sampled .npy point clouds (preferred, default: .../../../../data/processed/sampled/)")
+    p.add_argument("--out_dir", type=str, default=str(DEFAULT_OUT_DIR), help="Output directory for reports (default: ../../reports/)")
     p.add_argument("--n_preview", type=int, default=3, help="Number of preview samples per class (default 3)")
     p.add_argument("--max_samples", type=int, default=None, help="Limit total number of samples to inspect")
     p.add_argument("--fast", action="store_true", help="Fast debug mode: restrict to at most 20 samples and smaller plots")
