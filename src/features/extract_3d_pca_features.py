@@ -10,7 +10,7 @@ Debug / fast mode:
     python extract_3d_pca_features.py --sampled_dir data/processed/sampled --out_dir data/processed/descriptors --fast
 
 Full run:
-    python extract_3d_pca_features.py --sampled_dir data/processed/sampled --out_dir data/processed/descriptors --n_bins 8 --workers 4
+    python extract_3d_pca_features.py --sampled_dir ../../data/processed/sampled --out_dir ../../data/processed/descriptors --n_bins 8 --workers 4
 
 This script reads sampled point clouds (<id>.npy), computes PCA-based descriptors
 (eigenvalues, ratios, projection histogram on PC1), saves per-sample descriptor
@@ -267,10 +267,10 @@ def process_file(args_tuple):
 # -----------------------
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Extract PCA-based 3D descriptors from sampled point clouds.")
-    p.add_argument("--sampled_dir", type=str, default="../preprocessing/data/processed/sampled",
-                   help="Directory with sampled .npy point clouds (default: ../preprocessing/data/processed/sampled)")
-    p.add_argument("--out_dir", type=str, default="../preprocessing/data/processed/descriptors/",
-                   help="Output base directory for descriptors (default: ../preprocessing/data/processed/descriptors/)")
+    p.add_argument("--sampled_dir", type=str, default="../../data/processed/sampled",
+                   help="Directory with sampled .npy point clouds (default: ../../data/processed/sampled)")
+    p.add_argument("--out_dir", type=str, default="../../data/processed/descriptors",
+                   help="Output base directory for descriptors (default: ../../data/processed/descriptors)")
     p.add_argument("--n_bins", type=int, default=8, help="Number of histogram bins for PC1 projections (default: 8)")
     p.add_argument("--max_samples", type=int, default=None, help="Limit number of samples processed (default: None)")
     p.add_argument("--fast", action="store_true", help="Fast debug shorthand (sets max_samples=20)")
@@ -294,7 +294,7 @@ def main(argv=None):
 
     sampled_dir = Path(args.sampled_dir)
     out_dir = Path(args.out_dir)
-    reports_dir = Path("../preprocessing/reports/")
+    reports_dir = Path("../../reports")
     ensure_dir(out_dir)
     ensure_dir(reports_dir)
 
@@ -452,7 +452,7 @@ def main(argv=None):
 if __name__ == "__main__":
     # If invoked without args, run safe debug
     if len(sys.argv) == 1:
-        argv = ["--sampled_dir", "data/processed/sampled", "--out_dir", "data/processed/descriptors", "--fast", "--workers", "1"]
+        argv = ["--sampled_dir", "../../data/processed/sampled", "--out_dir", "../../data/processed/descriptors", "--fast", "--workers", "1"]
         sys.exit(main(argv))
     else:
         sys.exit(main(sys.argv[1:]))
