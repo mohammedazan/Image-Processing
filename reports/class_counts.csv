@@ -1,0 +1,8 @@
+class,n_files,total_points,mean_points,median_points,std_points
+Buche,132,135168,1024.0,1024.0,0.0
+Douglasie,147,150528,1024.0,1024.0,0.0
+Eiche,18,18432,1024.0,1024.0,0.0
+Esche,32,32768,1024.0,1024.0,0.0
+Fichte,127,130048,1024.0,1024.0,0.0
+Kiefer,20,20480,1024.0,1024.0,0.0
+Roteiche,81,82944,1024.0,1024.0,0.0
