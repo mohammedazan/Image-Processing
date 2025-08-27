@@ -87,12 +87,12 @@ def load_image(path: Path) -> np.ndarray:
     Uses cv2 if available, else PIL.
     """
     if _HAS_CV2:
+        # np.fromfile allows loading paths with non-ascii on Windows
         im = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
         if im is None:
-            # fallback to PIL
             pil = Image.open(str(path)).convert("L")
             return np.asarray(pil, dtype=np.uint8)
-        return im
+        return im.astype(np.uint8)
     else:
         pil = Image.open(str(path)).convert("L")
         return np.asarray(pil, dtype=np.uint8)
@@ -108,6 +108,7 @@ def _otsu_threshold_numpy(img: np.ndarray) -> int:
     wB = 0.0
     maximum = 0.0
     sum1 = np.dot(np.arange(256), hist)
+    level = 0
     for i in range(256):
         wB += hist[i]
         if wB == 0:
@@ -129,15 +130,18 @@ def compute_otsu(img: np.ndarray) -> Tuple[int, np.ndarray]:
     """
     Return threshold and binary mask using Otsu. Use cv2 if available else numpy.
     Auto-invert mask if the foreground (white) covers >50% of image (likely background).
+    Ensures mask values are 0 or 255 uint8.
     """
     if _HAS_CV2:
-        thresh, mask = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # cv2.threshold returns (thresh, mask) where mask is 0/255
+        thresh_val, mask = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh = int(thresh_val)
     else:
         t = _otsu_threshold_numpy(img)
         mask = (img > t).astype(np.uint8) * 255
         thresh = int(t)
 
-    # Ensure mask is binary (0/255)
+    # Ensure mask is binary 0/255 (uint8)
     mask = (mask > 127).astype(np.uint8) * 255
 
     # Heuristic: if the foreground (mask==255) occupies >50% of image, it's likely inverted -> invert
@@ -145,26 +149,34 @@ def compute_otsu(img: np.ndarray) -> Tuple[int, np.ndarray]:
     if fg_ratio > 0.5:
         mask = (255 - mask).astype(np.uint8)
 
-    return int(thresh), mask
+    return int(thresh), mask.astype(np.uint8)
 
 
 def find_largest_bbox(mask: np.ndarray) -> Tuple[int, int, int, int]:
     """
     Find bounding box of largest connected component in binary mask (uint8 0/255).
     Returns x,y,w,h. If none found, return whole image bbox.
+    Robust handling of cv2.findContours return signature.
     """
     h, w = mask.shape[:2]
     if _HAS_CV2:
+        # cv2.findContours return signature differs between versions; handle both.
         contours_info = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = contours_info[-2]
+        # contours are either at index 0 or 1 depending on OpenCV version
+        if len(contours_info) == 2:
+            contours = contours_info[0]
+        elif len(contours_info) >= 3:
+            contours = contours_info[1]
+        else:
+            contours = []
     else:
-        # naive connected component: find bounding boxes of nonzero pixels
         coords = np.argwhere(mask > 0)
         if coords.size == 0:
             return 0, 0, w, h
         y0, x0 = coords.min(axis=0)
         y1, x1 = coords.max(axis=0)
         return int(x0), int(y0), int(x1 - x0 + 1), int(y1 - y0 + 1)
+
     if not contours:
         return 0, 0, w, h
     # choose largest by area (cv2.contourArea)
@@ -176,22 +188,20 @@ def find_largest_bbox(mask: np.ndarray) -> Tuple[int, int, int, int]:
 def pad_and_resize(img: np.ndarray, target: int, bg_color: str) -> np.ndarray:
     """
     Resize preserving aspect ratio and pad to (target,target) with bg_color.
-    img is numpy uint8 grayscale.
+    img is numpy uint8 grayscale. Return uint8 grayscale array shape (target,target).
     """
-    pil = Image.fromarray(img)
-    # maintain aspect ratio
+    pil = Image.fromarray(img)  # 'L'
+    # maintain aspect ratio and fit inside target x target
     pil_thumb = ImageOps.contain(pil, (target, target))
-    # create background
-    bg = (255, 255, 255) if bg_color == "white" else (0, 0, 0)
-    new_im = Image.new("RGB", (target, target), color=bg)
+    # create background in 'L' mode (grayscale) to avoid accidental color conversions
+    bg = 255 if bg_color == "white" else 0
+    new_im = Image.new("L", (target, target), color=bg)
     # paste centered
-    # convert pil_thumb to RGB (grayscale)
-    paste = pil_thumb.convert("RGB")
+    paste = pil_thumb.convert("L")
     x = (target - paste.width) // 2
     y = (target - paste.height) // 2
     new_im.paste(paste, (x, y))
-    # return grayscale array
-    return np.asarray(new_im.convert("L"), dtype=np.uint8)
+    return np.asarray(new_im, dtype=np.uint8)
 
 
 # -----------------------
@@ -325,7 +335,7 @@ def preprocess_image(img: np.ndarray,
 
     if not preprocess_crop:
         # resize/pad original image
-        preproc = pad_and_resize(img, resolution, bg_color)
+        preproc = pad_and_resize(img, resolution, bg_color)  # uint8 L
 
         # Resize mask preserving aspect ratio using NEAREST (no interpolation)
         mask_pil = Image.fromarray(mask).convert("L")
@@ -335,14 +345,14 @@ def preprocess_image(img: np.ndarray,
         new_h = max(1, int(round(oh * scale)))
         mask_nn = mask_pil.resize((new_w, new_h), resample=Image.NEAREST)
 
-        # re-binarize
+        # re-binarize and ensure 0/255
         mask_np = np.asarray(mask_nn, dtype=np.uint8)
         mask_np = (mask_np > 128).astype(np.uint8) * 255
 
         # clean mask
         mask_np = clean_mask_np(mask_np, resolution)
 
-        # paste into background centered
+        # paste into background centered (L mode)
         mask_bg = Image.new("L", (resolution, resolution), color=0)
         x = (resolution - new_w) // 2
         y = (resolution - new_h) // 2
@@ -378,14 +388,14 @@ def preprocess_image(img: np.ndarray,
     new_h = max(1, int(round(oh * scale)))
     mask_nn = mask_pil.resize((new_w, new_h), resample=Image.NEAREST)
 
-    # re-binarize
+    # re-binarize and ensure 0/255
     mask_np = np.asarray(mask_nn, dtype=np.uint8)
     mask_np = (mask_np > 128).astype(np.uint8) * 255
 
     # clean mask
     mask_np = clean_mask_np(mask_np, resolution)
 
-    # paste to center
+    # paste to center (L mode)
     mask_bg = Image.new("L", (resolution, resolution), color=0)
     xpad = (resolution - new_w) // 2
     ypad = (resolution - new_h) // 2
@@ -470,20 +480,29 @@ def save_preview(id: str,
                  resolution: int) -> None:
     """
     Save a 3-panel collage:
-      - left: grid of chosen raw views (up to 3)
-      - center: preprocessed image
-      - right: cleaned mask or grayscale representation
+      - left: grid of chosen raw views (up to 3). Each thumbnail is exactly (resolution,resolution).
+      - center: preprocessed image (exactly resolution x resolution)
+      - right: cleaned mask or grayscale representation (exactly resolution x resolution)
+    This enforces fixed panel widths to avoid seams/artifacts due to variable widths/padding.
     """
-    panels = []
-    # left: concatenate chosen raw views horizontally (converted to RGB)
+    # prepare fixed-size thumbnails for left (each exactly resolution x resolution, RGB)
     left_imgs = []
     for p in chosen_view_paths[:3]:
         try:
             raw = Image.open(p).convert("RGB")
-            raw = ImageOps.contain(raw, (resolution, resolution))
+            # contain then paste on fixed thumbnail canvas to ensure exact size
+            thumb = ImageOps.contain(raw, (resolution, resolution))
+            bg_rgb = (255, 255, 255) if bg_color == "white" else (0, 0, 0)
+            thumb_canvas = Image.new("RGB", (resolution, resolution), color=bg_rgb)
+            x = (resolution - thumb.width) // 2
+            y = (resolution - thumb.height) // 2
+            thumb_canvas.paste(thumb.convert("RGB"), (x, y))
+            left_imgs.append(thumb_canvas)
         except Exception:
-            raw = Image.new("RGB", (resolution, resolution), color=(255, 255, 255) if bg_color == "white" else (0, 0, 0))
-        left_imgs.append(raw)
+            bg_rgb = (255, 255, 255) if bg_color == "white" else (0, 0, 0)
+            left_imgs.append(Image.new("RGB", (resolution, resolution), color=bg_rgb))
+
+    # if no left imgs, create one blank thumbnail
     if not left_imgs:
         left = Image.new("RGB", (resolution, resolution), color=(255, 255, 255) if bg_color == "white" else (0, 0, 0))
     else:
@@ -495,15 +514,18 @@ def save_preview(id: str,
             left.paste(im, (x, 0))
             x += im.width
 
-    # center: preproc_img (grayscale numpy)
+    # center: ensure preproc_img is exactly (resolution,resolution) L mode then convert to RGB
     try:
-        center = Image.fromarray(preproc_img).convert("RGB")
+        center_pil = Image.fromarray(preproc_img).convert("L")
+        if center_pil.size != (resolution, resolution):
+            center_pil = center_pil.resize((resolution, resolution), resample=Image.BICUBIC)
+        center = center_pil.convert("RGB")
     except Exception:
         center = Image.new("RGB", (resolution, resolution), color=(255, 255, 255) if bg_color == "white" else (0, 0, 0))
-    center = ImageOps.contain(center, (resolution, resolution))
 
-    # right: mask or grayscale (ensure using NEAREST if resize is needed)
+    # right: mask or grayscale (ensure binary mask is preserved using NEAREST)
     try:
+        # mask should be uint8 L (0/255)
         right_pil = Image.fromarray(mask).convert("L")
         if right_pil.size != (resolution, resolution):
             right_pil = right_pil.resize((resolution, resolution), resample=Image.NEAREST)
@@ -511,9 +533,9 @@ def save_preview(id: str,
     except Exception:
         right = Image.new("RGB", (resolution, resolution), color=(255, 255, 255) if bg_color == "white" else (0, 0, 0))
 
-    # normalize heights
+    # normalize heights (should be equal because thumbnails fixed, but keep safe)
     h = max(left.height, center.height, right.height)
-    # pad each to height h
+
     def pad_vert(im):
         if im.height == h:
             return im
@@ -550,7 +572,7 @@ def process_sample_worker(args_tuple: Tuple) -> Dict[str, Any]:
     bg_color = config["bg_color"]
     expected_views = int(config["expected_views"])
     overwrite = bool(config["overwrite"])
-    reports_dir = Path("reports")
+    reports_dir = Path(config.get("reports_dir", "reports"))  # use config-provided reports_dir
     result = {"success": False, "id": sample_id, "vec": None, "note": ""}
 
     try:
@@ -567,8 +589,12 @@ def process_sample_worker(args_tuple: Tuple) -> Dict[str, Any]:
                 hu = compute_hu_from_image(target_for_hu)
                 hu_list.append(hu)
             except Exception as e:
-                with open(reports_dir / "read_errors.log", "a", encoding="utf-8") as fh:
-                    fh.write(f"{vpath}\t{type(e).__name__}\t{e}\n")
+                try:
+                    ensure_dir(reports_dir)
+                    with open(reports_dir / "read_errors.log", "a", encoding="utf-8") as fh:
+                        fh.write(f"{vpath}\t{type(e).__name__}\t{e}\n")
+                except Exception:
+                    pass
                 continue
 
         if len(hu_list) == 0:
@@ -593,8 +619,8 @@ def process_sample_worker(args_tuple: Tuple) -> Dict[str, Any]:
         return result
     except Exception as e:
         try:
-            ensure_dir(Path("reports"))
-            with open(Path("reports") / "read_errors.log", "a", encoding="utf-8") as fh:
+            ensure_dir(Path(config.get("reports_dir", "reports")))
+            with open(Path(config.get("reports_dir", "reports")) / "read_errors.log", "a", encoding="utf-8") as fh:
                 fh.write(f"{dir_path}\t{type(e).__name__}\t{e}\n")
         except Exception:
             pass
@@ -675,7 +701,8 @@ def main(argv=None) -> int:
         "crop_margin": float(args.crop_margin),
         "bg_color": args.bg_color,
         "expected_views": int(args.expected_views),
-        "overwrite": bool(args.overwrite)
+        "overwrite": bool(args.overwrite),
+        "reports_dir": str(reports_dir)   # pass reports_dir explicitly
     }
 
     tasks = [(sid, str(dpath), config) for sid, dpath in ids]
@@ -786,6 +813,8 @@ def main(argv=None) -> int:
 
             preproc, mask = preprocess_image(img, int(args.resolution), float(args.crop_margin), args.bg_color, bool(args.preprocess_crop))
             preview_out = reports_dir / "sample_images" / f"{sid}_hu_preview.png"
+
+            # pass mask if use_silhouette else pass preproc (kept behavior) but both are forced to have correct shapes inside save_preview
             save_preview(sid, chosen, preproc, (mask if args.use_silhouette else preproc), preview_out, args.bg_color, int(args.resolution))
 
             if preview_debug_printed < 5:
@@ -795,8 +824,11 @@ def main(argv=None) -> int:
                 preview_debug_printed += 1
 
         except Exception as e:
-            with open(reports_dir / "read_errors.log", "a", encoding="utf-8") as fh:
-                fh.write(f"{dir_path}\tpreview_failed\t{e}\n")
+            try:
+                with open(reports_dir / "read_errors.log", "a", encoding="utf-8") as fh:
+                    fh.write(f"{dir_path}\tpreview_failed\t{e}\n")
+            except Exception:
+                pass
             logger.debug(f"Failed to create preview for {sid}: {e}")
             continue
 
