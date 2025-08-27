@@ -35,6 +35,14 @@ except Exception:
     cv2 = None
     _HAS_CV2 = False
 
+# optional scipy.ndimage
+try:
+    from scipy import ndimage as ndi
+    _HAS_NDIMAGE = True
+except Exception:
+    ndi = None
+    _HAS_NDIMAGE = False
+
 # YAML optional
 try:
     import yaml
@@ -120,7 +128,7 @@ def _otsu_threshold_numpy(img: np.ndarray) -> int:
 def compute_otsu(img: np.ndarray) -> Tuple[int, np.ndarray]:
     """
     Return threshold and binary mask using Otsu. Use cv2 if available else numpy.
-    Auto-invert mask if the largest component appears to be the background.
+    Auto-invert mask if the foreground (white) covers >50% of image (likely background).
     """
     if _HAS_CV2:
         thresh, mask = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -132,7 +140,7 @@ def compute_otsu(img: np.ndarray) -> Tuple[int, np.ndarray]:
     # Ensure mask is binary (0/255)
     mask = (mask > 127).astype(np.uint8) * 255
 
-    # Heuristic: if the foreground (mask==255) occupies >50% of image, it is probably the background -> invert
+    # Heuristic: if the foreground (mask==255) occupies >50% of image, it's likely inverted -> invert
     fg_ratio = float(np.count_nonzero(mask) / mask.size)
     if fg_ratio > 0.5:
         mask = (255 - mask).astype(np.uint8)
@@ -159,7 +167,7 @@ def find_largest_bbox(mask: np.ndarray) -> Tuple[int, int, int, int]:
         return int(x0), int(y0), int(x1 - x0 + 1), int(y1 - y0 + 1)
     if not contours:
         return 0, 0, w, h
-    # choose largest by area
+    # choose largest by area (cv2.contourArea)
     max_cnt = max(contours, key=lambda c: cv2.contourArea(c) if _HAS_CV2 else 0)
     x, y, ww, hh = cv2.boundingRect(max_cnt)
     return int(x), int(y), int(ww), int(hh)
@@ -186,6 +194,115 @@ def pad_and_resize(img: np.ndarray, target: int, bg_color: str) -> np.ndarray:
     return np.asarray(new_im.convert("L"), dtype=np.uint8)
 
 
+# -----------------------
+# Mask cleaning helper
+# -----------------------
+def clean_mask_np(mask_np: np.ndarray, resolution: int, min_size: Optional[int] = None) -> np.ndarray:
+    """
+    Clean binary mask (uint8 0/255) and return cleaned mask (uint8 0/255).
+    Steps:
+      - ensure binary
+      - morphological opening (cv2 or scipy.ndimage), fallback to simple numpy op
+      - remove small components (keep >= min_size), if none keep largest
+    """
+    if min_size is None:
+        min_size = max(8, int(0.001 * resolution * resolution))  # default: 0.1% of image area
+
+    # ensure binary 0/1
+    bin_mask = (mask_np > 127).astype(np.uint8)
+
+    # morphological opening (3x3)
+    if _HAS_CV2:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        opened = cv2.morphologyEx((bin_mask * 255).astype(np.uint8), cv2.MORPH_OPEN, kernel, iterations=1)
+        bin_mask = (opened > 127).astype(np.uint8)
+    elif _HAS_NDIMAGE:
+        bin_mask = ndi.binary_opening(bin_mask, structure=np.ones((3, 3))).astype(np.uint8)
+    else:
+        # simple erosion then dilation (numpy)
+        pad = np.pad(bin_mask, 1, mode="constant", constant_values=0)
+        eroded = np.zeros_like(bin_mask)
+        for y in range(bin_mask.shape[0]):
+            for x in range(bin_mask.shape[1]):
+                if pad[y:y+3, x:x+3].sum() == 9:
+                    eroded[y, x] = 1
+        pad2 = np.pad(eroded, 1, mode="constant", constant_values=0)
+        dilated = np.zeros_like(eroded)
+        for y in range(eroded.shape[0]):
+            for x in range(eroded.shape[1]):
+                if pad2[y:y+3, x:x+3].sum() >= 1:
+                    dilated[y, x] = 1
+        bin_mask = dilated
+
+    # Remove small components; prefer keeping components >= min_size; if none, keep largest
+    if _HAS_CV2:
+        num_labels, labels_im, stats, _ = cv2.connectedComponentsWithStats(bin_mask.astype(np.uint8), connectivity=8)
+        if num_labels <= 1:
+            cleaned = bin_mask
+        else:
+            areas = stats[1:, cv2.CC_STAT_AREA]
+            keep = np.zeros_like(bin_mask)
+            for i, area in enumerate(areas, start=1):
+                if int(area) >= min_size:
+                    keep[labels_im == i] = 1
+            if keep.sum() == 0:
+                max_idx = 1 + int(np.argmax(areas))
+                keep = (labels_im == max_idx).astype(np.uint8)
+            cleaned = keep
+    elif _HAS_NDIMAGE:
+        labeled, ncomp = ndi.label(bin_mask)
+        if ncomp == 0:
+            cleaned = bin_mask
+        else:
+            sizes = np.array(ndi.sum(bin_mask, labeled, range(1, ncomp + 1)))
+            keep_flags = sizes >= min_size
+            if not keep_flags.any():
+                keep_flags[np.argmax(sizes)] = True
+            keep_mask = np.zeros_like(bin_mask)
+            for i, flag in enumerate(keep_flags, start=1):
+                if flag:
+                    keep_mask[labeled == i] = 1
+            cleaned = keep_mask
+    else:
+        # naive flood fill labeling (numpy)
+        h, w = bin_mask.shape
+        labels = np.zeros((h, w), dtype=np.int32)
+        cur = 0
+        areas = []
+        for y in range(h):
+            for x in range(w):
+                if bin_mask[y, x] and labels[y, x] == 0:
+                    cur += 1
+                    stack = [(y, x)]
+                    labels[y, x] = cur
+                    area = 0
+                    while stack:
+                        yy, xx = stack.pop()
+                        area += 1
+                        for ny in (yy-1, yy, yy+1):
+                            for nx in (xx-1, xx, xx+1):
+                                if 0 <= ny < h and 0 <= nx < w and labels[ny, nx] == 0 and bin_mask[ny, nx]:
+                                    labels[ny, nx] = cur
+                                    stack.append((ny, nx))
+                    areas.append(area)
+        if cur == 0:
+            cleaned = bin_mask
+        else:
+            areas = np.array(areas)
+            keep_mask = np.zeros_like(bin_mask)
+            for lbl_idx, area in enumerate(areas, start=1):
+                if int(area) >= min_size:
+                    keep_mask[labels == lbl_idx] = 1
+            if keep_mask.sum() == 0:
+                keep_mask = (labels == (1 + int(np.argmax(areas)))).astype(np.uint8)
+            cleaned = keep_mask
+
+    return (cleaned.astype(np.uint8) * 255)
+
+
+# -----------------------
+# Preprocessing
+# -----------------------
 def preprocess_image(img: np.ndarray,
                      resolution: int,
                      crop_margin: float,
@@ -195,7 +312,7 @@ def preprocess_image(img: np.ndarray,
     Preprocess a grayscale uint8 image:
     - If preprocess_crop: compute Otsu silhouette, bbox of largest component, expand by crop_margin,
       crop, resize+pad to resolution.
-    - Returns (preprocessed_img, silhouette_mask) as uint8 arrays.
+    - Returns (preprocessed_img, cleaned_silhouette_mask) as uint8 arrays.
     """
     assert img.ndim == 2
     h, w = img.shape[:2]
@@ -203,22 +320,33 @@ def preprocess_image(img: np.ndarray,
     try:
         _, mask = compute_otsu(img)
     except Exception:
-        # fallback simple threshold at median
         t = int(np.median(img))
         mask = (img > t).astype(np.uint8) * 255
 
     if not preprocess_crop:
         # resize/pad original image
         preproc = pad_and_resize(img, resolution, bg_color)
-        # resize mask similarly but preserve binary values (use nearest-like behavior)
+
+        # Resize mask preserving aspect ratio using NEAREST (no interpolation)
         mask_pil = Image.fromarray(mask).convert("L")
-        mask_resized = ImageOps.contain(mask_pil, (resolution, resolution))
-        # re-binarize to remove interpolation artifacts
-        mask_resized = mask_resized.point(lambda p: 255 if p > 128 else 0).convert("L")
+        ow, oh = mask_pil.width, mask_pil.height
+        scale = min(resolution / float(ow), resolution / float(oh))
+        new_w = max(1, int(round(ow * scale)))
+        new_h = max(1, int(round(oh * scale)))
+        mask_nn = mask_pil.resize((new_w, new_h), resample=Image.NEAREST)
+
+        # re-binarize
+        mask_np = np.asarray(mask_nn, dtype=np.uint8)
+        mask_np = (mask_np > 128).astype(np.uint8) * 255
+
+        # clean mask
+        mask_np = clean_mask_np(mask_np, resolution)
+
+        # paste into background centered
         mask_bg = Image.new("L", (resolution, resolution), color=0)
-        x = (resolution - mask_resized.width) // 2
-        y = (resolution - mask_resized.height) // 2
-        mask_bg.paste(mask_resized, (x, y))
+        x = (resolution - new_w) // 2
+        y = (resolution - new_h) // 2
+        mask_bg.paste(Image.fromarray(mask_np).convert("L"), (x, y))
         mask_arr = np.asarray(mask_bg, dtype=np.uint8)
         return preproc, mask_arr
 
@@ -241,14 +369,27 @@ def preprocess_image(img: np.ndarray,
     cropped_mask = mask[y0:y1, x0:x1]
     # resize+pad
     preproc = pad_and_resize(cropped, resolution, bg_color)
-    # resize mask similar
+
+    # Resize mask preserving aspect ratio using NEAREST
     mask_pil = Image.fromarray(cropped_mask).convert("L")
-    mask_resized = ImageOps.contain(mask_pil, (resolution, resolution))
-    mask_resized = mask_resized.point(lambda p: 255 if p > 128 else 0).convert("L")
+    ow, oh = mask_pil.width, mask_pil.height
+    scale = min(resolution / float(ow), resolution / float(oh))
+    new_w = max(1, int(round(ow * scale)))
+    new_h = max(1, int(round(oh * scale)))
+    mask_nn = mask_pil.resize((new_w, new_h), resample=Image.NEAREST)
+
+    # re-binarize
+    mask_np = np.asarray(mask_nn, dtype=np.uint8)
+    mask_np = (mask_np > 128).astype(np.uint8) * 255
+
+    # clean mask
+    mask_np = clean_mask_np(mask_np, resolution)
+
+    # paste to center
     mask_bg = Image.new("L", (resolution, resolution), color=0)
-    xpad = (resolution - mask_resized.width) // 2
-    ypad = (resolution - mask_resized.height) // 2
-    mask_bg.paste(mask_resized, (xpad, ypad))
+    xpad = (resolution - new_w) // 2
+    ypad = (resolution - new_h) // 2
+    mask_bg.paste(Image.fromarray(mask_np).convert("L"), (xpad, ypad))
     mask_arr = np.asarray(mask_bg, dtype=np.uint8)
     return preproc, mask_arr
 
@@ -263,9 +404,7 @@ def compute_hu_from_image(img_or_mask: np.ndarray) -> np.ndarray:
         hu = cv2.HuMoments(moments).reshape((7,))
     else:
         # fallback: approximate moments using numpy (centered raw moments)
-        # This is a simplified fallback; for safety return zeros if cv2 not available and image blank
         try:
-            # compute raw moments up to order 3
             y, x = np.indices(img_or_mask.shape)
             I = img_or_mask.astype(np.float64)
             m00 = I.sum() + 1e-12
@@ -279,7 +418,6 @@ def compute_hu_from_image(img_or_mask: np.ndarray) -> np.ndarray:
                 for q in range(4):
                     if p + q <= 3:
                         mu[(p, q)] = (((x - xbar) ** p) * ((y - ybar) ** q) * I).sum()
-            # compute normalized central moments and Hu moments approximately -> fallback zeros
             hu = np.zeros((7,), dtype=np.float64)
         except Exception:
             hu = np.zeros((7,), dtype=np.float64)
@@ -288,7 +426,6 @@ def compute_hu_from_image(img_or_mask: np.ndarray) -> np.ndarray:
     hu_log = []
     for m in hu:
         val = -np.sign(m) * np.log10(abs(float(m)) + eps)
-        # handle infinite
         if math.isinf(val) or math.isnan(val):
             val = 0.0
         hu_log.append(val)
@@ -321,7 +458,6 @@ def append_to_csv(records: List[Dict[str, Any]], out_csv_path: Path, overwrite: 
             return
         except Exception as e:
             logger.debug(f"Failed to append to existing CSV; will overwrite. Error: {e}")
-    # write new
     df_new.to_csv(out_csv_path, index=False)
 
 
@@ -336,7 +472,7 @@ def save_preview(id: str,
     Save a 3-panel collage:
       - left: grid of chosen raw views (up to 3)
       - center: preprocessed image
-      - right: mask or grayscale representation
+      - right: cleaned mask or grayscale representation
     """
     panels = []
     # left: concatenate chosen raw views horizontally (converted to RGB)
@@ -366,12 +502,14 @@ def save_preview(id: str,
         center = Image.new("RGB", (resolution, resolution), color=(255, 255, 255) if bg_color == "white" else (0, 0, 0))
     center = ImageOps.contain(center, (resolution, resolution))
 
-    # right: mask or grayscale
+    # right: mask or grayscale (ensure using NEAREST if resize is needed)
     try:
-        right = Image.fromarray(mask).convert("RGB")
+        right_pil = Image.fromarray(mask).convert("L")
+        if right_pil.size != (resolution, resolution):
+            right_pil = right_pil.resize((resolution, resolution), resample=Image.NEAREST)
+        right = right_pil.convert("RGB")
     except Exception:
         right = Image.new("RGB", (resolution, resolution), color=(255, 255, 255) if bg_color == "white" else (0, 0, 0))
-    right = ImageOps.contain(right, (resolution, resolution))
 
     # normalize heights
     h = max(left.height, center.height, right.height)
@@ -402,11 +540,6 @@ def save_preview(id: str,
 # Worker processing
 # -----------------------
 def process_sample_worker(args_tuple: Tuple) -> Dict[str, Any]:
-    """
-    Worker function to process one sample directory.
-    args_tuple: (id, dir_path_str, config_dict)
-    Returns dict: {"success": bool, "id": id, "vec": list(14) or None, "note": str}
-    """
     sample_id, dir_path_str, config = args_tuple
     dir_path = Path(dir_path_str)
     out_dir = Path(config["out_dir"])
@@ -421,7 +554,6 @@ def process_sample_worker(args_tuple: Tuple) -> Dict[str, Any]:
     result = {"success": False, "id": sample_id, "vec": None, "note": ""}
 
     try:
-        # list view images sorted lexicographically
         view_files = sorted([p for p in dir_path.glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg")], key=lambda p: str(p))
         if len(view_files) == 0:
             raise FileNotFoundError(f"No view images in {dir_path}")
@@ -435,7 +567,6 @@ def process_sample_worker(args_tuple: Tuple) -> Dict[str, Any]:
                 hu = compute_hu_from_image(target_for_hu)
                 hu_list.append(hu)
             except Exception as e:
-                # per-view failure: log and continue
                 with open(reports_dir / "read_errors.log", "a", encoding="utf-8") as fh:
                     fh.write(f"{vpath}\t{type(e).__name__}\t{e}\n")
                 continue
@@ -448,11 +579,9 @@ def process_sample_worker(args_tuple: Tuple) -> Dict[str, Any]:
         stds = np.std(hu_arr, axis=0, ddof=0).astype(np.float32)
         vec = np.concatenate([means, stds], axis=0).astype(np.float32)  # length 14
 
-        # save per-sample npy
         p = out_dir / f"{sample_id}_hu.npy"
         ensure_dir(out_dir)
         if p.exists() and not overwrite:
-            # still overwrite semantics: overwrite only if overwrite True
             pass
         np.save(str(p), vec, allow_pickle=False)
 
@@ -463,7 +592,6 @@ def process_sample_worker(args_tuple: Tuple) -> Dict[str, Any]:
         result.update({"success": True, "vec": vec.tolist(), "note": note})
         return result
     except Exception as e:
-        # log
         try:
             ensure_dir(Path("reports"))
             with open(Path("reports") / "read_errors.log", "a", encoding="utf-8") as fh:
@@ -499,7 +627,6 @@ def parse_args(argv=None):
 
 
 def _init_worker(seed: int):
-    """Module-level worker initializer for deterministic RNG."""
     try:
         from multiprocessing import current_process
         ident = getattr(current_process(), "_identity", None)
@@ -530,13 +657,11 @@ def main(argv=None) -> int:
         max_samples = args.max_samples
         n_preview = args.n_preview
 
-    # list sample ids
     ids = list_sample_ids(views_dir)
     if not ids:
         logger.warning(f"No sample directories found under {views_dir}")
         return 0
 
-    # deterministic sort already applied
     if max_samples is not None:
         ids = ids[:max_samples]
     total = len(ids)
@@ -586,7 +711,6 @@ def main(argv=None) -> int:
             rec["note"] = note
             records.append(rec)
         else:
-            # failed sample: still record note
             rec = {"id": sid}
             for i in range(7):
                 rec[f"hu{i+1}_mean"] = float("nan")
@@ -595,12 +719,10 @@ def main(argv=None) -> int:
             rec["note"] = note
             records.append(rec)
 
-    # CSV path
     out_csv = out_dir / "hu_features_table.csv"
     append_to_csv(records, out_csv, overwrite=args.overwrite)
     logger.info(f"Wrote Hu features table to {out_csv}")
 
-    # Save stats to reports/hu_feature_stats.csv
     try:
         df_num = pd.read_csv(out_csv).select_dtypes(include=[np.number])
         stats = df_num.agg(["mean", "std"]).transpose().reset_index().rename(columns={"index": "feature"})
@@ -610,7 +732,6 @@ def main(argv=None) -> int:
     except Exception as e:
         logger.debug(f"Failed to write hu_feature_stats.csv: {e}")
 
-    # Save config yaml
     cfg = {
         "timestamp": datetime.datetime.now().isoformat(sep=" ", timespec="seconds"),
         "views_dir": str(views_dir),
@@ -638,12 +759,12 @@ def main(argv=None) -> int:
     except Exception:
         logger.debug("Failed to write config YAML")
 
-    # Previews: for first n_preview successful ids create collage
+    # Previews: for first n_preview successful ids create collage and print before/after white pixel counts
     success_ids = [r for r in results if r.get("success")]
+    preview_debug_printed = 0
     for r in success_ids[:n_preview]:
         sid = r["id"]
         dir_path = views_dir / sid
-        # choose representative views: view_01, view_05, view_09
         chosen = []
         for name in ["view_01.png", "view_05.png", "view_09.png"]:
             p = dir_path / name
@@ -654,12 +775,25 @@ def main(argv=None) -> int:
             chosen = pngs[:3]
         if not chosen:
             continue
-        # preprocess the first chosen view to get preproc and mask
         try:
             img = load_image(chosen[0])
+            # raw mask before cleaning (for stats)
+            try:
+                _, raw_mask = compute_otsu(img)
+            except Exception:
+                t = int(np.median(img))
+                raw_mask = (img > t).astype(np.uint8) * 255
+
             preproc, mask = preprocess_image(img, int(args.resolution), float(args.crop_margin), args.bg_color, bool(args.preprocess_crop))
             preview_out = reports_dir / "sample_images" / f"{sid}_hu_preview.png"
             save_preview(sid, chosen, preproc, (mask if args.use_silhouette else preproc), preview_out, args.bg_color, int(args.resolution))
+
+            if preview_debug_printed < 5:
+                before = int(np.count_nonzero(raw_mask))
+                after = int(np.count_nonzero(mask))
+                print(f"[mask-clean] {sid}: white-pixels before={before}, after={after}")
+                preview_debug_printed += 1
+
         except Exception as e:
             with open(reports_dir / "read_errors.log", "a", encoding="utf-8") as fh:
                 fh.write(f"{dir_path}\tpreview_failed\t{e}\n")
@@ -669,7 +803,6 @@ def main(argv=None) -> int:
     mode = "fast" if args.fast else "full"
     n_processed = len(records)
     print(f"Hu extraction finished. Mode: {mode}. Samples processed: {n_processed}. Descriptors saved to {out_dir}.")
-    # print first CSV row preview
     try:
         if out_csv.exists():
             dfp = pd.read_csv(out_csv, nrows=1)
@@ -682,7 +815,6 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    # Safe debug default when no args provided
     if len(sys.argv) == 1:
         argv = ["--views_dir", "../../data/processed/views/", "--out_dir", "../../data/processed/2d_hu", "--fast", "--workers", "1"]
         sys.exit(main(argv))
