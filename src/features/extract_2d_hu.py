@@ -130,24 +130,60 @@ def compute_otsu(img: np.ndarray) -> Tuple[int, np.ndarray]:
     """
     Return threshold and binary mask using Otsu. Use cv2 if available else numpy.
     Auto-invert mask if the foreground (white) covers >50% of image (likely background).
+    Applies light Gaussian blur and morphological cleanup to reduce speckle.
     Ensures mask values are 0 or 255 uint8.
     """
+    # apply small blur first to connect sparse dots (prefer cv2 GaussianBlur)
     if _HAS_CV2:
-        # cv2.threshold returns (thresh, mask) where mask is 0/255
-        thresh_val, mask = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        thresh = int(thresh_val)
+        try:
+            blur = cv2.GaussianBlur(img, (5, 5), 0)
+        except Exception:
+            blur = img
+        try:
+            thresh_val, mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            thresh = int(thresh_val)
+        except Exception:
+            t = _otsu_threshold_numpy(blur)
+            thresh = int(t)
+            mask = (blur > t).astype(np.uint8) * 255
     else:
-        t = _otsu_threshold_numpy(img)
-        mask = (img > t).astype(np.uint8) * 255
+        # try PIL blur fallback
+        try:
+            from PIL import ImageFilter
+            pil = Image.fromarray(img)
+            pil = pil.filter(ImageFilter.GaussianBlur(radius=1))
+            blur = np.asarray(pil)
+        except Exception:
+            blur = img
+        t = _otsu_threshold_numpy(blur)
         thresh = int(t)
+        mask = (blur > t).astype(np.uint8) * 255
 
     # Ensure mask is binary 0/255 (uint8)
     mask = (mask > 127).astype(np.uint8) * 255
 
-    # Heuristic: if the foreground (mask==255) occupies >50% of image, it's likely inverted -> invert
+    # Heuristic invert if foreground > 50% (likely background was selected)
     fg_ratio = float(np.count_nonzero(mask) / mask.size)
     if fg_ratio > 0.5:
         mask = (255 - mask).astype(np.uint8)
+
+    # Morphological cleanup: close then open to fill holes and remove small speckle
+    if _HAS_CV2:
+        try:
+            kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern, iterations=2)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kern, iterations=1)
+        except Exception:
+            pass
+    else:
+        if _HAS_NDIMAGE:
+            try:
+                binm = (mask > 127)
+                binm = ndi.binary_closing(binm, structure=np.ones((3, 3)))
+                binm = ndi.binary_opening(binm, structure=np.ones((3, 3)))
+                mask = (binm.astype(np.uint8) * 255)
+            except Exception:
+                pass
 
     return int(thresh), mask.astype(np.uint8)
 
@@ -529,6 +565,8 @@ def save_preview(id: str,
         right_pil = Image.fromarray(mask).convert("L")
         if right_pil.size != (resolution, resolution):
             right_pil = right_pil.resize((resolution, resolution), resample=Image.NEAREST)
+        # ensure strict binary after any resizing
+        right_pil = right_pil.point(lambda p: 255 if p > 128 else 0).convert("L")
         right = right_pil.convert("RGB")
     except Exception:
         right = Image.new("RGB", (resolution, resolution), color=(255, 255, 255) if bg_color == "white" else (0, 0, 0))
