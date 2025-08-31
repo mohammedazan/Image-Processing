@@ -1,0 +1,5 @@
+BernoulliNB training completed at 2025-08-31T18:23:27
+Features used: both
+Alpha: 0.1
+cv_5fold: f1_macro_mean=0.3795±0.0551
+Split=test: acc=0.3205 bal_acc=0.2000 f1_macro=0.0971

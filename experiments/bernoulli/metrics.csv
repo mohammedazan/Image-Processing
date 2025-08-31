@@ -1,0 +1,3 @@
+split,f1_macro_mean,f1_macro_std,accuracy_mean,accuracy_std,accuracy,balanced_accuracy,f1_macro,precision_Douglasie,recall_Douglasie,f1_Douglasie,support_Douglasie,precision_Eiche,recall_Eiche,f1_Eiche,support_Eiche,precision_Fichte,recall_Fichte,f1_Fichte,support_Fichte,precision_Kiefer,recall_Kiefer,f1_Kiefer,support_Kiefer,confusion_matrix_json
+cv_5fold,0.3794685191103774,0.0550631498751606,0.490422322775264,0.05161567460700359,,,,,,,,,,,,,,,,,,,,
+test,,,,,0.32051282051282054,0.2,0.0970873786407767,0.0,0.0,0.0,29.0,0.0,0.0,0.0,4.0,0.32051282051282054,1.0,0.4854368932038835,25.0,0.0,0.0,0.0,1.0,"{""labels"": [""Douglasie"", ""Eiche"", ""Fichte"", ""Kiefer""], ""matrix"": [[0, 0, 29, 0], [0, 0, 4, 0], [0, 0, 25, 0], [0, 0, 1, 0]]}"
