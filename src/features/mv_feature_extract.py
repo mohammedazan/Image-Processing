@@ -278,6 +278,22 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def save_labels_from_ids(ids: List[str], out_csv: Path) -> None:
+    """
+    Create a labels CSV from sample IDs (id,label).
+    Label is inferred as prefix before first underscore.
+    """
+    rows = []
+    for sid in ids:
+        label = sid.split("_")[0] if "_" in sid else sid
+        rows.append({"id": sid, "label": label})
+
+    df = pd.DataFrame(rows).drop_duplicates()
+    ensure_dir(out_csv.parent)
+    df.to_csv(out_csv, index=False)
+    logger.info(f"Saved derived labels CSV: {out_csv} ({len(df)} rows)")
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     if args.verbose:
@@ -362,6 +378,10 @@ def main(argv=None) -> int:
     csv_path = out_dir / "mv_features_table.csv"
     append_or_update_csv(csv_records, csv_path, overwrite=args.overwrite)
     logger.info(f"Wrote mv features table to {csv_path}")
+
+    ids_done = [r["id"] for r in results if "id" in r]
+    labels_csv = out_dir / "mv_labels.csv"
+    save_labels_from_ids(ids_done, labels_csv)
 
     # Save run config
     cfg = {
