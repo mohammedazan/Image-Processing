@@ -8,9 +8,14 @@ Usage (debug / FAST mode):
     python train_pointnet.py --data_dir data/sampled --out_dir experiments/pointnet --fast --verbose --epochs 5
 
 Full run example:
-    python train_pointnet.py --data_dir /content/drive/MyDrive/tree_dataset/data/mv_features \
-                             --out_dir /content/drive/MyDrive/tree_dataset/experiments/pointnet \
-                             --epochs 50 --batch_size 32 --lr 0.001 --patience 5
+    python train_pointnet.py --data_dir ../../data/processed/mv_features --out_dir ../../experiments/pointnet   --epochs 50 --batch_size 32 --lr 0.001 --patience 5
+
+    python -m train_bernoulli_nb `
+  --raw_dir ../data/raw/dataverse_files `
+  --test_dir ../data/raw/Test `
+  --hu_csv ../data/processed/2d_hu/hu_features_table.csv `
+  --pca_csv ../data/processed/descriptors/descriptors_table_pca.csv `
+  --dry_run                         
 """
 import argparse
 import logging
@@ -302,8 +307,8 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) == 1:
         demo_argv = [
-            "--data_dir", "data/processed/sampled",
-            "--out_dir", "experiments/pointnet",
+            "--data_dir", "../../data/processed/sampled",
+            "--out_dir", "../../experiments/pointnet",
             "--fast", "--verbose",
             "--epochs", "5"
         ]
