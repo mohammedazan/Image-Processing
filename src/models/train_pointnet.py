@@ -46,9 +46,11 @@ logger = logging.getLogger(__name__)
 # Dataset
 # -------------------------
 class PointCloudDataset(Dataset):
-    def __init__(self, root_dir, augment=False, label2idx=None):
+    def __init__(self, root_dir, augment=False, label2idx=None, num_points: int = 1024, mode: str = "points"):
         self.files = sorted(Path(root_dir).glob("*.npy"))
         self.augment = augment
+        self.num_points = int(num_points) if num_points and int(num_points) > 0 else None
+        self.mode = mode  # 'points' or 'vector'
         if label2idx is None:
             labels_set = set(Path(f).stem.split("_")[0] for f in self.files)
             self.label2idx = {l: i for i, l in enumerate(sorted(labels_set))}
@@ -58,15 +60,63 @@ class PointCloudDataset(Dataset):
     def __len__(self):
         return len(self.files)
 
+# ---------- تعديل __getitem__ فـ PointCloudDataset ----------
     def __getitem__(self, idx):
         fpath = self.files[idx]
-        pts = np.load(fpath).astype(np.float32)
+        arr = np.load(fpath)
+        if self.mode == "points":
+            pts = self._normalize_points_array(arr)
+        else:
+            # vector mode: ensure 1D float32
+            if arr.ndim == 2 and 1 in arr.shape:
+                arr = arr.reshape(-1)
+            if arr.ndim != 1:
+                raise ValueError(f"Expected 1D feature vector in 'vector' mode, got shape {arr.shape}")
+            pts = arr.astype(np.float32)
         label_str = Path(fpath).stem.split("_")[0]
         label = self.label2idx[label_str]
-        if self.augment:
+        if self.augment and self.mode == "points":
             pts = self.apply_augmentations(pts)
-        return torch.from_numpy(pts), torch.tensor(label, dtype=torch.long)
-        
+        # Optional resampling/padding to fixed number of points (points mode only)
+        if self.mode == "points" and self.num_points is not None:
+            pts = self._resample_points(pts, self.num_points)
+        return torch.from_numpy(pts.astype(np.float32)), torch.tensor(label, dtype=torch.long)
+
+    def _normalize_points_array(self, pts: np.ndarray) -> np.ndarray:
+        """
+        Normalize various possible shapes to (N, 3):
+        - (N, 3): keep
+        - (3, N): transpose
+        - (N, D>=3): take first 3 columns
+        - (3,): single point -> (1,3)
+        - (K,) where K % 3 == 0: reshape to (-1,3)
+        Otherwise: raise ValueError.
+        """
+        pts = np.asarray(pts)
+        if pts.ndim == 2 and pts.shape[1] == 3:
+            return pts
+        if pts.ndim == 2 and pts.shape[0] == 3:
+            return pts.T
+        if pts.ndim == 2 and pts.shape[1] > 3:
+            return pts[:, :3]
+        if pts.ndim == 1 and pts.shape[0] == 3:
+            return pts.reshape(1, 3)
+        if pts.ndim == 1 and pts.shape[0] % 3 == 0:
+            return pts.reshape(-1, 3)
+        raise ValueError(f"Unsupported point array shape {pts.shape} in file. Expected (N,3) or convertible.")
+
+    def _resample_points(self, pts: np.ndarray, num_points: int) -> np.ndarray:
+        """Randomly down/up-sample to num_points deterministically per call (uses numpy RNG)."""
+        n = pts.shape[0]
+        if n == num_points:
+            return pts
+        if n > num_points:
+            idx = np.random.choice(n, num_points, replace=False)
+            return pts[idx]
+        # n < num_points -> pad by repeating
+        pad_idx = np.random.choice(n, num_points - n, replace=True)
+        return np.concatenate([pts, pts[pad_idx]], axis=0)
+
     def apply_augmentations(self, pts):
         # Rotation around Z axis
         theta = random.uniform(0, 2 * np.pi)
@@ -117,6 +167,8 @@ class PointNet(nn.Module):
 
     def forward(self, x):
         # Input x: (B, N, 3) -> (B, 3, N)
+        if x.ndim != 3 or x.size(-1) != 3:
+            raise ValueError(f"PointNet expects input of shape (B,N,3), got {tuple(x.shape)}")
         x = x.transpose(2, 1)
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
@@ -127,6 +179,31 @@ class PointNet(nn.Module):
         x = F.relu(self.bn5(self.dropout(self.fc2(x))))
         x = self.fc3(x)
         return x
+
+
+# -------------------------
+# Model: Simple MLP for 1D feature vectors
+# -------------------------
+class MLPClassifier(nn.Module):
+    def __init__(self, input_dim: int, num_classes: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 512),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.2),
+            nn.Linear(256, num_classes),
+        )
+
+    def forward(self, x):
+        # x: (B, D)
+        if x.ndim != 2:
+            x = x.view(x.size(0), -1)
+        return self.net(x)
 
 # -------------------------
 # Evaluation
@@ -169,7 +246,27 @@ def train_pointnet(args):
     data_files = sorted(Path(args.data_dir).glob("*.npy"))
     labels_set = {Path(f).stem.split("_")[0] for f in data_files}
     label2idx = {l: i for i, l in enumerate(sorted(labels_set))}
-    full_dataset = PointCloudDataset(args.data_dir, augment=True, label2idx=label2idx)
+    # Auto-detect vector vs points if requested
+    mode = getattr(args, "mode", "auto")
+    if not data_files:
+        raise FileNotFoundError(f"No .npy files found in {args.data_dir}")
+    sample = np.load(data_files[0])
+    if mode == "auto":
+        data_mode = "vector" if sample.ndim == 1 else "points"
+    else:
+        data_mode = mode
+    if data_mode == "vector":
+        logger.info("Detected 1D feature vectors. Using MLP classifier.")
+    else:
+        logger.info("Detected point clouds (N,3). Using PointNet classifier.")
+
+    full_dataset = PointCloudDataset(
+        args.data_dir,
+        augment=True,
+        label2idx=label2idx,
+        num_points=getattr(args, "num_points", 1024),
+        mode=data_mode,
+    )
     num_classes = len(label2idx)
 
     # Split into train/validation
@@ -188,7 +285,13 @@ def train_pointnet(args):
                             num_workers=num_workers, pin_memory=pin_memory)
 
     # Model, loss, optimizer, scheduler
-    model = PointNet(num_classes=num_classes).to(device)
+    if data_mode == "vector":
+        # infer input dim from a sample
+        x0 = torch.from_numpy(np.load(data_files[0]).reshape(-1).astype(np.float32))
+        input_dim = int(x0.numel())
+        model = MLPClassifier(input_dim=input_dim, num_classes=num_classes).to(device)
+    else:
+        model = PointNet(num_classes=num_classes).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
@@ -276,6 +379,8 @@ def build_argparser():
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--patience", type=int, default=5)
+    p.add_argument("--num_points", type=int, default=1024, help="Number of points per sample after resampling/padding (points mode)")
+    p.add_argument("--mode", type=str, choices=["auto", "points", "vector"], default="auto", help="Auto-detect data type or force points/vector model")
     p.add_argument("--fast", action="store_true", help="Load only 20 samples (debug mode)")
     p.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     return p
