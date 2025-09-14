@@ -106,6 +106,24 @@ def read_pointcloud(path: Path) -> np.ndarray:
         if arr.ndim != 2 or arr.shape[1] < 3:
             raise ValueError(f"Invalid .npy shape for point cloud: {arr.shape}")
         return arr[:, :3].astype(np.float64)
+        # Special-case .pts which sometimes has a header line with counts
+    if ext == ".pts":
+        # try Open3D already attempted above. Try numpy.loadtxt with flexible skiprows
+        try:
+            # attempt without skiprows
+            arr = np.loadtxt(path, delimiter=None)
+            if arr.ndim == 2 and arr.shape[1] >= 3:
+                return arr[:, :3].astype(np.float64)
+        except Exception:
+            pass
+        # try with skiprows=1 (header = number of points)
+        try:
+            arr = np.loadtxt(path, delimiter=None, skiprows=1)
+            if arr.ndim == 2 and arr.shape[1] >= 3:
+                return arr[:, :3].astype(np.float64)
+        except Exception:
+            logger.debug(f"np.loadtxt failed for .pts fallback on {path}")
+        # fallthrough to generic line-by-line parser
 
     # Try Open3D for common formats
     if _HAS_OPEN3D and ext in {".ply", ".pcd", ".xyz", ".pts"}:
@@ -137,6 +155,8 @@ def read_pointcloud(path: Path) -> np.ndarray:
     if len(coords) == 0:
         raise ValueError(f"No valid XYZ rows found in {path}")
     return np.asarray(coords, dtype=np.float64)
+
+
 
 
 def clean_pointcloud(points: np.ndarray,
