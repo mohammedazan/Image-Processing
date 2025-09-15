@@ -342,6 +342,10 @@ def render_fallback_matplotlib(points: np.ndarray,
     ax.scatter(xs, ys, s=s, color=(0.0, 0.0, 0.0) if bg_color == "white" else (1.0, 1.0, 1.0), marker="o", linewidths=0, alpha=1.0)
     ax.set_xticks([])
     ax.set_yticks([])
+    
+    ax.axis("off")
+    ax.set_frame_on(False)
+    
     ax.set_xlim(np.min(xs) - 1, np.max(xs) + 1)
     ax.set_ylim(np.min(ys) - 1, np.max(ys) + 1)
     ax.set_aspect("equal", adjustable="box")
