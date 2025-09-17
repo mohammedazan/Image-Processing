@@ -9,7 +9,7 @@ Comparative analysis for experiments:
 - Produce an interpretation report (Markdown) with basic automated notes
 
 Usage (debug / fast):
-    python compare_results.py --results_dir experiments --out_dir reports --fast --max_exp 6 --verbose
+    python compare_results.py --results_dir ../experiments --out_dir ../reports --fast --max_exp 6 --verbose
 
 Full run example:
     python compare_results.py --results_dir experiments \

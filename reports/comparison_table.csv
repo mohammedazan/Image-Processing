@@ -1,0 +1,4 @@
+experiment,accuracy,balanced_accuracy,macro_f1,mean_precision,mean_recall,prediction_time
+mv_stack,0.4774774774774775,0.2901193633952254,0.2626557235579792,0.3614652014652014,0.2901193633952254,
+bernoulli,,,,,,
+pointnet,,,,,,
