@@ -864,7 +864,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             X_val_df[feat_cols] = scaler.transform(X_val_df[feat_cols].values)
 
     # --- Thresholds (fit on training set only) ---
-    # Avant de calculer les seuils, on dÃƒÂ©tecte et enlÃƒÂ¨ve les colonnes constantes
+    # Avant de calculer les seuils, on dÃƒÆ’Ã‚Â©tecte et enlÃƒÆ’Ã‚Â¨ve les colonnes constantes
     feat_cols = [c for c in X_train_df.columns if c != "id"]
     n_unique = X_train_df[feat_cols].nunique(dropna=False)
     
@@ -873,7 +873,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.warning(
             f"Ignoring {len(constant_cols)} constant features with no variance: {constant_cols[:10]}{'...' if len(constant_cols) > 10 else ''}"
         )
-        # on les enlÃƒÂ¨ve de train (et val si existe)
+        # on les enlÃƒÆ’Ã‚Â¨ve de train (et val si existe)
         X_train_df = X_train_df.drop(columns=constant_cols)
         if X_val_df is not None:
             X_val_df = X_val_df.drop(columns=[c for c in constant_cols if c in X_val_df.columns])
@@ -963,8 +963,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.info(f"CV ({k}-fold) macro F1: mean={np.mean(fold_scores):.4f} std={np.std(fold_scores):.4f}; accuracy mean={np.mean(fold_acc):.4f}")
         # --- AFTER CV loop: build OOF confusion matrix and save it to results dir ---
         try:
-            # oof_preds array aligned with X_train_df rows (positional indices)
-            oof_preds = np.empty(len(X_train_df), dtype=object)
+            # Initialize OOF preds explicitly with None placeholders (object dtype)
+            oof_preds = np.array([None] * len(X_train_df), dtype=object)
+            
             for fold, (tr_idx, va_idx) in enumerate(cv_obj.split(X_train_df, y_train), start=1):
                 Xtr = X_train_df.iloc[tr_idx].copy()
                 Xva = X_train_df.iloc[va_idx].copy()
@@ -976,20 +977,31 @@ def main(argv: Optional[List[str]] = None) -> int:
                 clf_f = BernoulliNB(alpha=selected_alpha)
                 clf_f.fit(Xb_tr, ytr)
                 pred_va = clf_f.predict(Xb_va)
-                # store OOF preds into positional array
+                # store OOF preds into positional array (va_idx is array-like of positions)
                 oof_preds[va_idx] = pred_va
-        
-            # compute metrics and write confusion matrix for OOF preds
-            if np.any([p is not None for p in oof_preds]):
-                oof_preds_list = list(oof_preds)
-                m_oof = compute_metrics(y_train, oof_preds_list, labels=labels_list)
-                # append to metrics_rows
+            
+            # verify all positions filled
+            missing_mask = [p is None for p in oof_preds]
+            if any(missing_mask):
+                logger.warning(f"{sum(missing_mask)} samples have no OOF prediction (unexpected). They will be ignored in OOF metrics.")
+            # Build list of preds aligned with y_train indices, replacing remaining None with a placeholder
+            oof_preds_list = [str(p) if p is not None else "__MISSING__" for p in oof_preds]
+            
+            # compute metrics and write confusion matrix for OOF preds (ignore __MISSING__ if any)
+            # For compute_metrics we must align to y_train: filter out missing entries
+            valid_idx = [i for i, p in enumerate(oof_preds_list) if p != "__MISSING__"]
+            if len(valid_idx) > 0:
+                y_train_valid = y_train.iloc[valid_idx]
+                oof_valid = [oof_preds_list[i] for i in valid_idx]
+                m_oof = compute_metrics(y_train_valid, oof_valid, labels=labels_list)
                 m_oof["split"] = "oof_cv"
                 metrics_rows.append(m_oof)
-                # save confusion matrix figure
                 cm_oof = np.array(m_oof["confusion_matrix"], dtype=int)
                 plot_confusion_matrix(cm_oof, labels_list, title="Confusion Matrix - OOF CV", out_path=base_res_dir / "confusion_matrix_oof_cv.png")
                 logger.info(f"Saved OOF CV confusion matrix to {base_res_dir / 'confusion_matrix_oof_cv.png'}")
+            else:
+                logger.warning("No valid OOF predictions were generated; skipping OOF confusion matrix.")
+
         except Exception as e:
             logger.warning(f"Failed to build/save OOF confusion matrix: {e}")
 
@@ -1028,6 +1040,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Save model
     ensure_dir(base_exp_dir)
+    # Save model + label mapping together for safe evaluation later
+    model_payload = {"model": final_clf, "label_map": sorted(list(set(y_all)))}
+    joblib.dump(model_payload, base_exp_dir / "bernoulli_model_with_labels.joblib")
+    # keep legacy artifact too
     joblib.dump(final_clf, base_exp_dir / "bernoulli_model.joblib")
 
     # Test evaluation if provided via CSV or derived directory labels
@@ -1105,12 +1121,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary_lines.append(f"BernoulliNB training completed at {cfg['timestamp']}")
     summary_lines.append(f"Features used: {features_choice}")
     summary_lines.append(f"Alpha: {selected_alpha}")
+    def fmtMetric(v):
+        try:
+            return f"{float(v):.4f}"
+        except Exception:
+            return "n/a"
+    
     if metrics_rows:
         for r in metrics_rows:
-            if r.get("split") in ("val", "test"):
-                summary_lines.append(f"Split={r['split']}: acc={r.get('accuracy', 'n/a'):.4f} bal_acc={r.get('balanced_accuracy', 'n/a'):.4f} f1_macro={r.get('f1_macro', 'n/a'):.4f}")
-            elif "cv_" in str(r.get("split", "")):
-                summary_lines.append(f"{r['split']}: f1_macro_mean={r.get('f1_macro_mean', 'n/a'):.4f}Ã‚Â±{r.get('f1_macro_std', 'n/a'):.4f}")
+            split = r.get("split", "unknown")
+            if split in ("val", "test"):
+                summary_lines.append(
+                    f"Split={split}: acc={fmtMetric(r.get('accuracy'))} bal_acc={fmtMetric(r.get('balanced_accuracy'))} f1_macro={fmtMetric(r.get('f1_macro'))}"
+                )
+            elif "cv_" in str(split):
+                summary_lines.append(
+                    f"{split}: f1_macro_mean={fmtMetric(r.get('f1_macro_mean'))}±{fmtMetric(r.get('f1_macro_std'))}"
+                )
+            elif split == "oof_cv":
+                # report a few metrics if available
+                summary_lines.append(f"OOF CV: f1_macro={fmtMetric(r.get('f1_macro'))} acc={fmtMetric(r.get('accuracy'))}")
+
     with open(base_exp_dir / "summary.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(summary_lines) + "\n")
 
