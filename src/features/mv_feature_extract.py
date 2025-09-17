@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 mv_feature_extract.py
 
@@ -8,13 +9,35 @@ For each sample directory under --views_dir (expected structure:
   <views_dir>/<sample_id>/view_01.png ... view_12.png)
 the script:
   - loads V views (any number found, sorted lexicographically),
-  - preprocesses images with ImageNet normalization,
-  - runs a frozen ResNet50 (pretrained) and extracts the 2048-d avgpool features,
+  - preprocesses images with ImageNet normalization (default),
+  - runs a frozen ResNet50 (pretrained if requested) and extracts the 2048-d avgpool features,
   - aggregates across views (mean and std) producing a 4096-d vector (mean || std),
   - saves per-sample numpy: <out_dir>/<id>_mv.npy (float32),
   - appends/updates a global CSV table: <out_dir>/mv_features_table.csv
 
-Designed to be robust (CPU/GPU, missing views, small batches).
+Improvements vs original:
+ - added --fast (process at most 20 samples) and --max_samples
+ - safer multiprocessing when GPU requested (workers > 1 will force cpu workers and warn)
+ - deterministic seeding (numpy + torch)
+ - helpful CLI usage examples below.
+
+Usage examples:
+  Fast debug (like other scripts):
+    python mv_feature_extract.py \
+      --views_dir /content/drive/.../data/processed/views \
+      --out_dir /content/drive/.../data/processed/mv_features \
+      --fast --pretrained --batch_size 8 --workers 1 --seed 42
+
+  Full run (multi-process, CPU workers recommended if many samples):
+    python mv_feature_extract.py \
+      --views_dir /content/drive/.../data/processed/views \
+      --out_dir /content/drive/.../data/processed/mv_features \
+      --pretrained --batch_size 16 --workers 4 --seed 42
+
+Notes:
+ - If you request GPU (e.g. --device cuda:0) and set workers>1, the script will warn and force workers=1
+   because multi-process GPU inference is fragile. Alternatively use workers>1 with --device cpu.
+ - Fast mode sets --max_samples 20 (but you can set --max_samples explicitly).
 """
 
 from __future__ import annotations
@@ -25,7 +48,7 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -60,8 +83,9 @@ def ensure_dir(p: Path) -> None:
 def list_sample_dirs(views_dir: Path) -> List[Tuple[str, Path]]:
     """
     Return list of (id, path) for immediate subdirectories of views_dir that contain image files.
+    Deterministic lexicographic sort.
     """
-    ids = []
+    ids: List[Tuple[str, Path]] = []
     if not views_dir.exists():
         return ids
     for d in sorted(views_dir.iterdir(), key=lambda p: str(p)):
@@ -84,23 +108,43 @@ def load_and_preprocess_image(path: Path, transform) -> torch.Tensor:
 def build_resnet50_feature_extractor(device: torch.device, pretrained: bool = True) -> nn.Module:
     """
     Build ResNet50 and return a feature extractor module that outputs 2048-d vectors per image.
-    We take output after the global avgpool and flatten it.
+    Wrap the conv->layer->avgpool pipeline and flatten to (B,2048).
+
+    Uses the newer torchvision 'weights' API when available to avoid deprecation warnings.
     """
-    model = models.resnet50(pretrained=pretrained)
-    # Remove fc, keep until avgpool
-    # One convenient way: replace fc with Identity and on forward take the flattened avgpool output
-    model.fc = nn.Identity()
-    # We'll create a wrapper to forward x through model and then flatten (model returns [B,2048,1,1]??).
+    # Choose weights in a way compatible with torchvision versions
+    weights_arg = None
+    if pretrained:
+        try:
+            # torchvision >= 0.13
+            from torchvision.models import ResNet50_Weights  # type: ignore
+            weights_arg = ResNet50_Weights.IMAGENET1K_V1
+        except Exception:
+            # older torchvision fallback (still accepts pretrained)
+            weights_arg = None
+
+    # Instantiate model
+    try:
+        if weights_arg is None:
+            # either pretrained==False or fallback path for old torchvision
+            model = models.resnet50(pretrained=pretrained)
+        else:
+            # use new weights API
+            model = models.resnet50(weights=weights_arg)
+    except TypeError:
+        # Extra fallback for very old/newer APIs: try both ways
+        try:
+            model = models.resnet50(pretrained=pretrained)
+        except Exception:
+            model = models.resnet50(weights=weights_arg if weights_arg is not None else None)
+
+    # create a wrapper that uses the standard layers up to avgpool
     class FeatureWrapper(nn.Module):
         def __init__(self, base):
             super().__init__()
             self.base = base
 
         def forward(self, x):
-            # base returns features before fc if fc is Identity; with torchvision ResNet, avgpool returns (B, 2048, 1, 1)
-            # but after replacing fc with Identity, forward still applies avgpool and flatten in the original implementation?
-            # Safer: replicate the forward up to avgpool:
-            # Use base.conv1.. base.layer4 .. base.avgpool
             x = self.base.conv1(x)
             x = self.base.bn1(x)
             x = self.base.relu(x)
@@ -158,13 +202,13 @@ def process_sample(sample_id: str,
     Process one sample directory: load views, run model in batches, aggregate mean/std, save npy.
     Returns record dict for CSV.
     """
-    rec = {"id": sample_id, "note": "", "n_views": 0}
+    rec: Dict[str, Any] = {"id": sample_id, "note": "", "n_views": 0, "feat_dim": 0, "saved_path": ""}
     view_files = sorted([p for p in sample_dir.glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg")], key=lambda p: str(p))
     if len(view_files) == 0:
         rec["note"] = "no_views"
         return rec
 
-    tensors = []
+    tensors: List[torch.Tensor] = []
     # load & transform on CPU
     for p in view_files:
         try:
@@ -184,12 +228,19 @@ def process_sample(sample_id: str,
     rec["n_views"] = int(n_views)
 
     feats = []
-    with torch.no_grad():
-        for i in range(0, n_views, batch_size):
-            batch = dataset[i:i+batch_size].to(device, non_blocking=True)
-            out = model(batch)  # (B, feat_dim)
-            out = out.detach().cpu().numpy()
-            feats.append(out)
+    try:
+        with torch.no_grad():
+            # move batches to device
+            for i in range(0, n_views, batch_size):
+                batch = dataset[i:i+batch_size].to(device, non_blocking=True)
+                out = model(batch)  # (B, feat_dim)
+                out_np = out.detach().cpu().numpy()
+                feats.append(out_np)
+    except Exception as e:
+        logger.debug(f"Model inference failed for {sample_id}: {e}")
+        rec["note"] = f"inference_failed:{e}"
+        return rec
+
     feats_arr = np.vstack(feats)  # (n_views, feat_dim)
     if feats_arr.ndim != 2:
         rec["note"] = "bad_feat_shape"
@@ -206,14 +257,19 @@ def process_sample(sample_id: str,
     if out_path.exists() and not overwrite:
         rec["note"] = "exists"
     else:
-        np.save(str(out_path), feat_vec.astype(np.float32), allow_pickle=False)
-        rec["note"] = "ok"
+        try:
+            np.save(str(out_path), feat_vec.astype(np.float32), allow_pickle=False)
+            rec["note"] = "ok"
+        except Exception as e:
+            rec["note"] = f"save_failed:{e}"
+            logger.debug(f"Failed saving {out_path}: {e}")
+            return rec
 
     # if fewer views than expected, set partial_views note
     if n_views < expected_views:
         rec["note"] = rec["note"] + (";partial_views" if rec["note"] else "partial_views")
 
-    # Also put some metadata
+    # metadata
     rec["feat_dim"] = int(mean_vec.shape[0])
     rec["saved_path"] = str(out_path)
     return rec
@@ -226,13 +282,25 @@ def mp_worker(task: Tuple[str, str, Dict[str, Any]]) -> Dict[str, Any]:
     """
     Worker executed in a separate process. Rebuilds model and transform locally on CPU.
     Expects task = (sample_id, sample_dir_str, cfg_dict)
-    cfg keys: out_dir, pretrained, batch_size, expected_views, overwrite, no_normalize
+    cfg keys: out_dir, pretrained, batch_size, expected_views, overwrite, no_normalize, seed
     """
     sid, dpath_str, cfg = task
     dpath = Path(dpath_str)
-    out_dir = Path(cfg["out_dir"])  # ensure Path inside worker
+    out_dir = Path(cfg["out_dir"])
 
-    # Build transform inside worker
+    # deterministic per-worker seed (derived)
+    seed = int(cfg.get("seed", 42))
+    try:
+        import multiprocessing as mp
+        from multiprocessing import current_process
+        wid = getattr(current_process(), "_identity", [0])[0] if hasattr(current_process(), "_identity") else 0
+    except Exception:
+        wid = 0
+    worker_seed = (seed + int(wid)) % (2 ** 31 - 1)
+    np.random.seed(int(worker_seed))
+    torch.manual_seed(int(worker_seed))
+
+    # Build transform inside worker (CPU)
     transform_list = [
         transforms.Resize((224, 224)),
         transforms.ToTensor()
@@ -258,6 +326,7 @@ def mp_worker(task: Tuple[str, str, Dict[str, Any]]) -> Dict[str, Any]:
         bool(cfg.get("overwrite", False))
     )
 
+
 # -------------------------
 # CLI / main
 # -------------------------
@@ -268,12 +337,14 @@ def parse_args(argv=None):
     p.add_argument("--device", type=str, default="cpu", help="Device: cpu or cuda (e.g. cuda:0)")
     p.add_argument("--batch_size", type=int, default=8, help="Batch size for model inference (per-sample views)")
     p.add_argument("--workers", type=int, default=1, help="Parallel worker processes (multiprocessing pool). 1 = single-process")
-    p.add_argument("--pretrained", action="store_true", help="Use pretrained ResNet50 weights (default False for explicitness); set if you want pretrained features")
+    p.add_argument("--pretrained", action="store_true", help="Use pretrained ResNet50 weights")
     p.add_argument("--expected_views", type=int, default=12, help="Expected number of views per sample (for notes)")
     p.add_argument("--overwrite", action="store_true", help="Overwrite existing per-sample .npy files")
     p.add_argument("--no_normalize", action="store_true", help="Disable ImageNet normalization (not recommended)")
-    p.add_argument("--workers_img", type=int, default=0, help="Number of threads for image loading (unused default).")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
+    p.add_argument("--fast", action="store_true", help="Fast debug: process at most 20 samples (shorthand for --max_samples 20)")
+    p.add_argument("--max_samples", type=int, default=None, help="Limit number of samples processed (first N)")
+    p.add_argument("--workers_img", type=int, default=0, help="Number of threads for image loading (unused placeholder)")
     p.add_argument("--verbose", action="store_true", help="Verbose logging")
     return p.parse_args(argv)
 
@@ -299,6 +370,7 @@ def main(argv=None) -> int:
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
+    # seeds
     np.random.seed(int(args.seed))
     torch.manual_seed(int(args.seed))
 
@@ -311,41 +383,69 @@ def main(argv=None) -> int:
         logger.warning(f"No sample directories with images found under {views_dir}")
         return 0
 
+    # fast / max_samples handling
+    max_samples: Optional[int] = args.max_samples
+    if args.fast:
+        max_samples = 20
+        logger.info("Fast mode enabled: will process at most 20 samples (use --max_samples to override)")
+
+    if max_samples is not None:
+        sample_list = sample_list[:int(max_samples)]
+
     # device handling
     device_str = args.device
-    if device_str.lower().startswith("cuda") and torch.cuda.is_available():
-        device = torch.device(device_str)
+    use_cuda = device_str.lower().startswith("cuda") and torch.cuda.is_available()
+    if device_str.lower().startswith("cuda") and not torch.cuda.is_available():
+        logger.warning("CUDA requested but not available. Falling back to CPU.")
+        use_cuda = False
+
+    # If user asked for workers>1 and requested CUDA device, force workers=1 to avoid multi-process GPU conflicts
+    if args.workers > 1 and use_cuda:
+        logger.warning("workers>1 with CUDA requested: forcing workers=1 to avoid multi-process GPU issues.")
+        workers = 1
     else:
-        device = torch.device("cpu")
-        if device_str.lower().startswith("cuda") and not torch.cuda.is_available():
-            logger.warning("CUDA requested but not available. Falling back to CPU.")
+        workers = max(1, int(args.workers))
+
+    device = torch.device(device_str if use_cuda else "cpu")
 
     # transforms (ImageNet defaults)
     transform_list = [
-        transforms.Resize((224, 224)),  # ensure consistent input size
+        transforms.Resize((224, 224)),
         transforms.ToTensor()
     ]
     if not args.no_normalize:
-        # standard ImageNet normalization
         transform_list.append(transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                                    std=[0.229, 0.224, 0.225]))
     transform = transforms.Compose(transform_list)
 
-    # build model (frozen)
+    # build model (frozen) on chosen device (only used in single-process mode)
     model = build_resnet50_feature_extractor(device=device, pretrained=bool(args.pretrained))
 
     logger.info(f"Device: {device}; pretrained={args.pretrained}; transform normalization={'OFF' if args.no_normalize else 'ON'}")
-    logger.info(f"Found {len(sample_list)} samples under {views_dir}")
+    logger.info(f"Found {len(sample_list)} samples under {views_dir} (processing {len(sample_list)} samples)")
 
-    results = []
-    # Single-process loop (workers>1 optional via multiprocessing.Pool, but keep simple/reliable)
-    if args.workers <= 1:
+    results: List[Dict[str, Any]] = []
+
+
+        # --- Warm-up weights to avoid concurrent downloads in multiprocessing workers ---
+    # If user asked pretrained and will spawn multiple CPU workers, build model once here
+    # so that torchvision downloads/cache the weights before workers start.
+    if args.pretrained and workers > 1:
+        try:
+            logger.info("Preloading ResNet50 weights in main process to avoid parallel downloads...")
+            # build once on CPU; this will populate cache
+            _ = build_resnet50_feature_extractor(torch.device("cpu"), pretrained=True)
+            torch.cuda.empty_cache()
+        except Exception as e:
+            logger.debug(f"Preload warm-up failed (non-fatal): {e}")
+
+    # Single-process loop
+    if workers <= 1:
         for sid, dpath in tqdm(sample_list, desc="Extracting mv features"):
             rec = process_sample(sid, dpath, out_dir, model, device, transform, args.batch_size, args.expected_views, args.overwrite)
             results.append(rec)
     else:
-        # Multiprocessing: spawn processes that each create their own model on device=cpu (avoid GPU multi-process issues)
-        # For safety we force device to cpu inside multiprocessing worker
+        # Multiprocessing: spawn CPU workers (each worker builds its own model on CPU)
         import multiprocessing as mp
 
         tasks = [
@@ -359,20 +459,25 @@ def main(argv=None) -> int:
                     "expected_views": int(args.expected_views),
                     "overwrite": bool(args.overwrite),
                     "no_normalize": bool(args.no_normalize),
+                    "seed": int(args.seed),
                 },
             )
             for sid, dpath in sample_list
         ]
-        with mp.Pool(processes=args.workers) as pool:
+        with mp.Pool(processes=workers) as pool:
             for r in tqdm(pool.imap_unordered(mp_worker, tasks), total=len(tasks), desc="Extracting mv features (mp)"):
                 results.append(r)
 
-    # Build CSV with feature metadata (we do not inline 4096 dims into CSV to avoid huge files).
-    # Instead we store per-sample npy paths and metadata; but many users prefer full flattened features in CSV.
-    # We'll include minimal meta and saved_path and feat_dim.
+    # Write metadata CSV (paths + notes)
     csv_records = []
     for r in results:
-        rec_csv = {"id": r.get("id", ""), "note": r.get("note", ""), "n_views": int(r.get("n_views", 0)), "feat_dim": int(r.get("feat_dim", 0)), "saved_path": r.get("saved_path", "")}
+        rec_csv = {
+            "id": r.get("id", ""),
+            "note": r.get("note", ""),
+            "n_views": int(r.get("n_views", 0) or 0),
+            "feat_dim": int(r.get("feat_dim", 0) or 0),
+            "saved_path": r.get("saved_path", "")
+        }
         csv_records.append(rec_csv)
 
     csv_path = out_dir / "mv_features_table.csv"
@@ -390,12 +495,14 @@ def main(argv=None) -> int:
         "out_dir": str(out_dir),
         "device": str(device),
         "batch_size": int(args.batch_size),
-        "workers": int(args.workers),
+        "workers": int(workers),
         "pretrained": bool(args.pretrained),
         "expected_views": int(args.expected_views),
         "overwrite": bool(args.overwrite),
         "no_normalize": bool(args.no_normalize),
-        "seed": int(args.seed)
+        "seed": int(args.seed),
+        "fast": bool(args.fast),
+        "max_samples": max_samples
     }
     cfg_path = out_dir / "mv_feature_extract_config.yaml"
     try:
@@ -415,7 +522,16 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        argv = ["--views_dir", "../../data/processed/views/", "--out_dir", "../../data/processed/mv_features", "--batch_size", "8", "--workers", "1", "--pretrained"]
-        sys.exit(main(argv))
+        # safe fast debug example
+        example = [
+            "--views_dir", "../../data/processed/views/",
+            "--out_dir", "../../data/processed/mv_features",
+            "--batch_size", "8",
+            "--workers", "1",
+            "--pretrained",
+            "--fast",
+            "--seed", "42"
+        ]
+        sys.exit(main(example))
     else:
         sys.exit(main(sys.argv[1:]))
