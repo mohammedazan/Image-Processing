@@ -56,6 +56,7 @@ python -m train_bernoulli_nb `
 
 """
 from __future__ import annotations
+import re
 
 import argparse
 import datetime
@@ -642,14 +643,34 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     features_df = merge_features(hu_df, pca_df, features_choice)
 
-    # Align with labels using intersection and log unmatched ids
+    # --- Normalize IDs to improve matching (strip extensions, replace separators/spaces) ---
+    def _normalize_id(s: object) -> str:
+        s = str(s)
+        # remove common extensions
+        s = re.sub(r'\.(pts|xyz|ply|pcd|npy|txt|csv)$', '', s, flags=re.IGNORECASE)
+        s = s.replace('\\', '/')
+        # convert directory separators to underscore (Class/123 -> Class_123)
+        s = s.replace('/', '_')
+        # replace spaces, colons, dashes with underscore
+        s = re.sub(r'[\s\-\:]+', '_', s)
+        # collapse multiple underscores
+        s = re.sub(r'_+', '_', s)
+        return s.strip('_')
+    
+    # Align with labels using intersection and log unmatched ids (with normalization)
     features_df = coerce_id_column(features_df)
-    assert labels_df is not None
+    labels_df = coerce_id_column(labels_df)  # ensure labels_df has 'id' too
+    
+    # normalize both sides (safe even if already normalized)
+    features_df['id'] = features_df['id'].astype(str).map(_normalize_id)
+    labels_df['id'] = labels_df['id'].astype(str).map(_normalize_id)
+    
     all_feat_ids = set(features_df["id"].astype(str))
     all_label_ids = set(labels_df["id"].astype(str))
     inter_ids = sorted(all_feat_ids & all_label_ids)
     dropped_from_labels = sorted(all_label_ids - all_feat_ids)
     dropped_from_features = sorted(all_feat_ids - all_label_ids)
+    
     logger.info(f"IDs: features={len(all_feat_ids)}, labels={len(all_label_ids)}, intersection={len(inter_ids)}")
     if len(inter_ids) == 0:
         try:
@@ -685,11 +706,69 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.info("Dry run: summary only. Exiting.")
         return 0
 
-    # Optional fast mode
+        # Optional fast mode -> stratified subsample (safer than head(20))
+    def stratified_subsample(X_df: pd.DataFrame, y_ser: pd.Series, n_samples: int, seed: int):
+        """
+        Return (X_sub, y_sub) as stratified subset of up to n_samples.
+        Falls back to a small balanced/random selection if stratified split is impossible.
+        """
+        total = len(X_df)
+        n_samples = min(int(n_samples), total)
+        if n_samples <= 0:
+            return X_df.copy(), y_ser.copy()
+
+        tmp = X_df.reset_index(drop=True).copy()
+        tmp["_label_tmp_"] = y_ser.reset_index(drop=True).astype(str).values
+
+        try:
+            from sklearn.model_selection import StratifiedShuffleSplit
+            sss = StratifiedShuffleSplit(n_splits=1, test_size=float(n_samples) / float(max(total, 1)), random_state=int(seed))
+            for _, idx in sss.split(tmp, tmp["_label_tmp_"]):
+                sel_idx = idx
+            sel = tmp.iloc[sel_idx].reset_index(drop=True)
+            Xs = sel.drop(columns=["_label_tmp_"])
+            ys = sel["_label_tmp_"].astype(str).reset_index(drop=True)
+            # If resulting sample has only one class, fall back
+            if len(ys.unique()) <= 1:
+                raise ValueError("Stratified split produced single-class subset; falling back.")
+            return Xs, ys
+        except Exception:
+            # Fallback: ensure at least one sample per class if possible, then fill randomly
+            rng = np.random.RandomState(seed)
+            labels = list(tmp["_label_tmp_"].unique())
+            chosen_idx = []
+            # ensure at least one per class (up to budget)
+            for lbl in labels:
+                if len(chosen_idx) >= n_samples:
+                    break
+                cand = tmp[tmp["_label_tmp_"] == lbl].index.tolist()
+                if cand:
+                    chosen_idx.append(int(rng.choice(cand)))
+            # fill remaining randomly
+            remaining = [i for i in tmp.index.tolist() if i not in chosen_idx]
+            rng.shuffle(remaining)
+            while len(chosen_idx) < n_samples and remaining:
+                chosen_idx.append(remaining.pop())
+            # unique preserving order
+            chosen_idx = list(dict.fromkeys(chosen_idx))
+            sel = tmp.loc[chosen_idx].reset_index(drop=True)
+            Xs = sel.drop(columns=["_label_tmp_"])
+            ys = sel["_label_tmp_"].astype(str).reset_index(drop=True)
+            if len(ys) == 0:
+                return X_df.head(n_samples).copy(), y_ser.head(n_samples).copy()
+            return Xs, ys
+
     if args.fast:
-        logger.info("Fast mode: taking first 20 labeled samples for a quick debug run.")
-        X = X.head(20).copy()
-        y = y.head(20).copy()
+        logger.info("Fast mode: building a small stratified subset (up to 20 samples) for a quick debug run.")
+        X_sub, y_sub = stratified_subsample(X.copy(), y.copy(), 20, int(args.seed))
+        if len(set(y_sub.tolist())) <= 1:
+            logger.warning("Fast subset contains only one label after stratified sampling; falling back to first 20 rows.")
+            X = X.head(20).copy()
+            y = y.head(20).copy()
+        else:
+            X = X_sub.copy()
+            y = y_sub.copy()
+
 
     # Prepare output directories
     base_exp_dir = Path("experiments/bernoulli")
@@ -710,13 +789,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     indices_val = None
 
     if do_split:
-        X_train_df, X_val_df, y_train, y_val = train_test_split(
-            X, y, test_size=args.val_size, random_state=args.seed, stratify=y
-        )
+        # If stratified split requested, check minimum class count first.
+        # Stratify requires at least 2 samples per class (since test_size > 0).
+        min_count = int(y.value_counts().min()) if len(y) > 0 else 0
+        stratify_arg = y if min_count >= 2 else None
+        if stratify_arg is None:
+            logger.warning(
+                "Cannot do stratified train/val split because some classes have <2 samples. "
+                "Falling back to non-stratified random split."
+            )
+        try:
+            X_train_df, X_val_df, y_train, y_val = train_test_split(
+                X, y, test_size=args.val_size, random_state=args.seed, stratify=stratify_arg
+            )
+        except ValueError as e:
+            # Defensive fallback: if sklearn still complains, perform non-stratified split
+            logger.warning(f"Stratified split failed ({e}). Falling back to non-stratified split.")
+            X_train_df, X_val_df, y_train, y_val = train_test_split(
+                X, y, test_size=args.val_size, random_state=args.seed, stratify=None
+            )
+
         indices_train = X_train_df["id"].tolist()
         indices_val = X_val_df["id"].tolist()
         # Drop/Impute based on training
         X_train_df, X_val_df = drop_and_impute(X_train_df, X_val_df)
+
     else:
         # CV will use all data; create single table with imputation based on full data median as proxy,
         # but ensure thresholds for binarization are computed within each CV split using training folds only.
@@ -735,10 +832,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         if X_val_df is not None:
             X_val_df[feat_cols] = scaler.transform(X_val_df[feat_cols].values)
 
-    # Thresholds (fit on training set only)
+    # --- Thresholds (fit on training set only) ---
+    # Avant de calculer les seuils, on détecte et enlève les colonnes constantes
+    feat_cols = [c for c in X_train_df.columns if c != "id"]
+    n_unique = X_train_df[feat_cols].nunique(dropna=False)
+    
+    constant_cols = [c for c in feat_cols if n_unique[c] <= 1]
+    if constant_cols:
+        logger.warning(
+            f"Ignoring {len(constant_cols)} constant features with no variance: {constant_cols[:10]}{'...' if len(constant_cols) > 10 else ''}"
+        )
+        # on les enlève de train (et val si existe)
+        X_train_df = X_train_df.drop(columns=constant_cols)
+        if X_val_df is not None:
+            X_val_df = X_val_df.drop(columns=[c for c in constant_cols if c in X_val_df.columns])
+    
+    # Maintenant calcul des seuils sur features restantes
     thresholds = fit_thresholds(
-        X_train_df, y_train, method=args.binarize_method, quantile=args.quantile, strategy=args.binarize_strategy
+        X_train_df,
+        y_train,
+        method=args.binarize_method,
+        quantile=args.quantile,
+        strategy=args.binarize_strategy,
     )
+    
     thr_meta = {
         "method": args.binarize_method,
         "strategy": args.binarize_strategy,
@@ -752,7 +869,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Apply thresholds
     Xb_train = apply_thresholds(X_train_df, thresholds)
-    labels_list = sorted(list(set(y)))
+    # build canonical list of labels to use in confusion matrices
+    if X_val_df is not None:
+        # include labels present in train+val so CM squares include all labels seen
+        labels_list = sorted(list(set(pd.concat([y_train, y_val]))))
+    else:
+        labels_list = sorted(list(set(y_train)))
+
 
     # Alpha selection (optional grid)
     cv_obj = choose_cv(y_train, int(args.cv_folds or 0), args.seed) if do_cv else None
