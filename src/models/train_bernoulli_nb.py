@@ -549,6 +549,12 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--fast", action="store_true", help="Process only first 20 labeled samples and write outputs to debug folder.")
     p.add_argument("--verbose", action="store_true")
+    p.add_argument("--out_dir", type=str, default=None,
+                   help="Base directory to save outputs. If provided, experiments/results will be created under this path.")
+    p.add_argument("--exp_dir", type=str, default=None,
+                   help="Optional explicit experiments dir (overrides --out_dir).")
+    p.add_argument("--res_dir", type=str, default=None,
+                   help="Optional explicit results dir (overrides --out_dir).")
 
     return p
 
@@ -686,8 +692,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     if dropped_from_features:
         logger.info(f"{len(dropped_from_features)} feature ids have no label and will be ignored.")
     # Save unmatched ids list
-    unmatched_outdir = Path(args.derived_splits_outdir)
+        # make derived_splits_outdir follow out_dir if user didn't override it explicitly
+    if args.out_dir and (args.derived_splits_outdir == "../data/splits" or args.derived_splits_outdir is None):
+        unmatched_outdir = Path(args.out_dir) / "splits"
+    else:
+        unmatched_outdir = Path(args.derived_splits_outdir)
     ensure_dir(unmatched_outdir)
+
     with open(unmatched_outdir / "unmatched_ids.txt", "w", encoding="utf-8") as fh:
         fh.write("# In labels but not in features\n")
         for i in dropped_from_labels:
@@ -771,12 +782,30 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
     # Prepare output directories
-    base_exp_dir = Path("experiments/bernoulli")
-    base_res_dir = Path("results/bernoulli")
+        # -----------------------------
+    # Output directories (configurable)
+    # -----------------------------
+    # priority: explicit exp_dir/res_dir > out_dir > defaults
+    if args.exp_dir:
+        base_exp_dir = Path(args.exp_dir)
+    elif args.out_dir:
+        base_exp_dir = Path(args.out_dir) / "experiments" / "bernoulli"
+    else:
+        base_exp_dir = Path("experiments") / "bernoulli"
+
+    if args.res_dir:
+        base_res_dir = Path(args.res_dir)
+    elif args.out_dir:
+        base_res_dir = Path(args.out_dir) / "results" / "bernoulli"
+    else:
+        base_res_dir = Path("results") / "bernoulli"
+
+    # debug subfolder for fast mode (timestamped)
     if args.fast:
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         base_exp_dir = base_exp_dir / f"debug_{stamp}"
         base_res_dir = base_res_dir / f"debug_{stamp}"
+
     ensure_dir(base_exp_dir)
     ensure_dir(base_res_dir)
 
@@ -833,7 +862,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             X_val_df[feat_cols] = scaler.transform(X_val_df[feat_cols].values)
 
     # --- Thresholds (fit on training set only) ---
-    # Avant de calculer les seuils, on détecte et enlève les colonnes constantes
+    # Avant de calculer les seuils, on dÃ©tecte et enlÃ¨ve les colonnes constantes
     feat_cols = [c for c in X_train_df.columns if c != "id"]
     n_unique = X_train_df[feat_cols].nunique(dropna=False)
     
@@ -842,7 +871,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.warning(
             f"Ignoring {len(constant_cols)} constant features with no variance: {constant_cols[:10]}{'...' if len(constant_cols) > 10 else ''}"
         )
-        # on les enlève de train (et val si existe)
+        # on les enlÃ¨ve de train (et val si existe)
         X_train_df = X_train_df.drop(columns=constant_cols)
         if X_val_df is not None:
             X_val_df = X_val_df.drop(columns=[c for c in constant_cols if c in X_val_df.columns])
@@ -1047,7 +1076,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             if r.get("split") in ("val", "test"):
                 summary_lines.append(f"Split={r['split']}: acc={r.get('accuracy', 'n/a'):.4f} bal_acc={r.get('balanced_accuracy', 'n/a'):.4f} f1_macro={r.get('f1_macro', 'n/a'):.4f}")
             elif "cv_" in str(r.get("split", "")):
-                summary_lines.append(f"{r['split']}: f1_macro_mean={r.get('f1_macro_mean', 'n/a'):.4f}±{r.get('f1_macro_std', 'n/a'):.4f}")
+                summary_lines.append(f"{r['split']}: f1_macro_mean={r.get('f1_macro_mean', 'n/a'):.4f}Â±{r.get('f1_macro_std', 'n/a'):.4f}")
     with open(base_exp_dir / "summary.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(summary_lines) + "\n")
 
