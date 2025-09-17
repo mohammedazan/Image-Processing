@@ -3,12 +3,10 @@
 eval.py — Unified evaluation script for classification models.
 
 Usage (debug / FAST mode):
-    python eval.py --model_dir experiments --test_csv data/test.csv \
-                   --base_dir data/processed/sampled --output_dir results --fast
+    python eval.py --model_dir ../experiments --test_csv ../data/raw/test.csv   --base_dir ../data/processed/sampled --output_dir ../reports --fast
 
 Full run example:
-    python eval.py --model_dir experiments --test_csv data/test.csv \
-                   --base_dir data/processed/sampled --output_dir results
+    python eval.py --model_dir ../experiments --test_csv ../data/raw/test.csv  --base_dir ../data/processed/sampled --features_dir ../data/features  --output_dir ../reports
 
 Notes:
 - The script scans subdirectories under --model_dir; each subdir is expected to contain

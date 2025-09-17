@@ -2,12 +2,10 @@
 """Train a multi-view stacking classifier on Hu and PCA features.
 Examples:
     # Full run
-    python train_stacking.py --hu_csv hu_features_table.csv --pca_csv descriptors_table_pca.csv \
-        --test_csv test.csv --out_dir experiments --binarize median --meta_clf logistic
+    python train_stacking.py --hu_csv ../../data/processed/2d_hu/hu_features_table.csv --pca_csv ../../data/processed/descriptors/descriptors_table_pca.csv  --test_csv ../../data/raw/test.csv --out_dir ../../experiments --binarize median --meta_clf logistic
 
     # Fast (debug) run
-    python train_stacking.py --hu_csv hu_features_table.csv --pca_csv descriptors_table_pca.csv \
-        --test_csv test.csv --out_dir experiments --binarize otsu --meta_clf xgboost --fast
+    python train_stacking.py --hu_csv ../../data/processed/2d_hu/hu_features_table.csv --pca_csv ../../data/processed/descriptors/descriptors_table_pca.csv  --test_csv ../../data/raw/test.csv --out_dir experiments --binarize otsu --meta_clf xgboost --fast
 """
 
 import os
@@ -33,7 +31,7 @@ from skimage.filters import threshold_otsu
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Multi-view stacking with Hu and PCA features.')
-    parser.add_argument('--hu_csv', type=str, required=True, help='Path to hu_features_table.csv')
+    parser.add_argument('--hu_csv', type=str, required=True, help='../../experiments')
     parser.add_argument('--pca_csv', type=str, required=True, help='Path to descriptors_table_pca.csv')
     parser.add_argument('--test_csv', type=str, required=True, help='Path to test.csv (IDs to exclude)')
     parser.add_argument('--out_dir', type=str, default='experiments', help='Output base directory')
