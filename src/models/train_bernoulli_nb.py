@@ -552,6 +552,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--out_dir", type=str, default=None,
                    help="Base directory to save outputs. If provided, experiments/results will be created under this path.")
     p.add_argument("--exp_dir", type=str, default=None,
+    
+    
                    help="Optional explicit experiments dir (overrides --out_dir).")
     p.add_argument("--res_dir", type=str, default=None,
                    help="Optional explicit results dir (overrides --out_dir).")
@@ -862,7 +864,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             X_val_df[feat_cols] = scaler.transform(X_val_df[feat_cols].values)
 
     # --- Thresholds (fit on training set only) ---
-    # Avant de calculer les seuils, on dÃ©tecte et enlÃ¨ve les colonnes constantes
+    # Avant de calculer les seuils, on dÃƒÂ©tecte et enlÃƒÂ¨ve les colonnes constantes
     feat_cols = [c for c in X_train_df.columns if c != "id"]
     n_unique = X_train_df[feat_cols].nunique(dropna=False)
     
@@ -871,7 +873,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.warning(
             f"Ignoring {len(constant_cols)} constant features with no variance: {constant_cols[:10]}{'...' if len(constant_cols) > 10 else ''}"
         )
-        # on les enlÃ¨ve de train (et val si existe)
+        # on les enlÃƒÂ¨ve de train (et val si existe)
         X_train_df = X_train_df.drop(columns=constant_cols)
         if X_val_df is not None:
             X_val_df = X_val_df.drop(columns=[c for c in constant_cols if c in X_val_df.columns])
@@ -959,6 +961,38 @@ def main(argv: Optional[List[str]] = None) -> int:
             fold_scores.append(f1m)
             fold_acc.append(acc)
         logger.info(f"CV ({k}-fold) macro F1: mean={np.mean(fold_scores):.4f} std={np.std(fold_scores):.4f}; accuracy mean={np.mean(fold_acc):.4f}")
+        # --- AFTER CV loop: build OOF confusion matrix and save it to results dir ---
+        try:
+            # oof_preds array aligned with X_train_df rows (positional indices)
+            oof_preds = np.empty(len(X_train_df), dtype=object)
+            for fold, (tr_idx, va_idx) in enumerate(cv_obj.split(X_train_df, y_train), start=1):
+                Xtr = X_train_df.iloc[tr_idx].copy()
+                Xva = X_train_df.iloc[va_idx].copy()
+                ytr = y_train.iloc[tr_idx]
+                # fit thresholds on fold / binarize / train
+                thr_f = fit_thresholds(Xtr, ytr, method=args.binarize_method, quantile=args.quantile, strategy=args.binarize_strategy)
+                Xb_tr = apply_thresholds(Xtr, thr_f)
+                Xb_va = apply_thresholds(Xva, thr_f)
+                clf_f = BernoulliNB(alpha=selected_alpha)
+                clf_f.fit(Xb_tr, ytr)
+                pred_va = clf_f.predict(Xb_va)
+                # store OOF preds into positional array
+                oof_preds[va_idx] = pred_va
+        
+            # compute metrics and write confusion matrix for OOF preds
+            if np.any([p is not None for p in oof_preds]):
+                oof_preds_list = list(oof_preds)
+                m_oof = compute_metrics(y_train, oof_preds_list, labels=labels_list)
+                # append to metrics_rows
+                m_oof["split"] = "oof_cv"
+                metrics_rows.append(m_oof)
+                # save confusion matrix figure
+                cm_oof = np.array(m_oof["confusion_matrix"], dtype=int)
+                plot_confusion_matrix(cm_oof, labels_list, title="Confusion Matrix - OOF CV", out_path=base_res_dir / "confusion_matrix_oof_cv.png")
+                logger.info(f"Saved OOF CV confusion matrix to {base_res_dir / 'confusion_matrix_oof_cv.png'}")
+        except Exception as e:
+            logger.warning(f"Failed to build/save OOF confusion matrix: {e}")
+
         metrics_rows.append({
             "split": f"cv_{k}fold",
             "f1_macro_mean": float(np.mean(fold_scores)),
@@ -1076,7 +1110,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             if r.get("split") in ("val", "test"):
                 summary_lines.append(f"Split={r['split']}: acc={r.get('accuracy', 'n/a'):.4f} bal_acc={r.get('balanced_accuracy', 'n/a'):.4f} f1_macro={r.get('f1_macro', 'n/a'):.4f}")
             elif "cv_" in str(r.get("split", "")):
-                summary_lines.append(f"{r['split']}: f1_macro_mean={r.get('f1_macro_mean', 'n/a'):.4f}Â±{r.get('f1_macro_std', 'n/a'):.4f}")
+                summary_lines.append(f"{r['split']}: f1_macro_mean={r.get('f1_macro_mean', 'n/a'):.4f}Ã‚Â±{r.get('f1_macro_std', 'n/a'):.4f}")
     with open(base_exp_dir / "summary.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(summary_lines) + "\n")
 
