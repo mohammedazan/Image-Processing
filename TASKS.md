@@ -205,3 +205,115 @@
 * إلا بغيتي، نولّدلك باش نبدأ: `extract_3d_pca_features.py`, `extract_2d_hu.py`, و `train_bernoulli_nb.py` جاهزين للّصق — قول فقط نولّدهم دابا.
 
 *إذا موافق، نقدر نصدّر هاد TASKS.md مباشرة فـrepo أو نفتح لك issues جاهزين لكل مهمة.*
+
+
+Project structure tree =
+├───Daily
+├───data
+│   ├───features = features_table.csv
+│   ├───processed
+│   │   ├───2d_hu
+│   │   ├───descriptors
+│   │   ├───mv_features
+│   │   ├───normals
+│   │   ├───sampled
+│   │   └───views
+│   └───raw
+│       ├───dataverse_files
+│       │   ├───Buche
+│       │   ├───Douglasie
+│       │   ├───Eiche
+│       │   ├───Esche
+│       │   ├───Fichte
+│       │   ├───Kiefer
+│       │   └───Roteiche
+│       └───Test
+│           ├───Buche
+│           ├───Douglasie
+│           ├───Eiche
+│           ├───Esche
+│           ├───Fichte
+│           ├───Kiefer
+│           └───Roteiche
+├───experiments
+     ├───bernoulli
+     │       bernoulli_model.joblib
+     │       bin_thresholds.yaml
+     │       config.yaml
+     │       metrics.csv
+     │       summary.txt
+     │
+     ├───mv_stack
+     │       bin_thresholds.yaml
+     │       metrics.csv
+     │       predictions.csv
+     │
+     └───pointnet
+             checkpoint.pth
+             last_checkpoint.pth
+             metrics.csv
+│   
+│   
+├───notebooks
+├───reports
+    │   │   class_counts.csv
+    │   comparison_notes.md
+    │   comparison_table.csv
+    │   eda_summary.md
+    │   hu_feature_stats.csv
+    │   metrics.csv
+    │   pca_feature_stats.csv
+    │   point_counts_per_file.csv
+    │   read_errors.log
+    │
+    ├───comparison_plots
+    │       accuracy_vs_time.png
+    │       confusion_grid.png
+    │       metrics_barplot.png
+    │
+    ├───plots
+    │       class_balance_bar.png
+    │       points_boxplot_per_class.png
+    │       point_count_histogram.png
+    │
+    ├───pointnet
+    │       metrics.json
+    │
+    └───sample_images
+            Buche_103_hu_preview.png
+            Buche_103_preview.png
+            Buche_106_hu_preview.png
+            Buche_106_preview.png
+            Buche_107_hu_preview.png
+            Buche_107_preview.png
+            Buche_109_hu_preview.png
+            Buche_109_preview.png
+            Buche_110_hu_preview.png
+│   
+│   
+│   
+├───results
+│   └───bernoulli
+└───src
+   ├   compare_results.py
+   │   eval.py
+   │   test.csv
+   │
+   ├───features
+   │       extract_2d_hu.py
+   │       extract_3d_pca_features.py
+   │       mv_feature_extract.py
+   │
+   ├───models
+   │   │   train_bernoulli_nb.py
+   │   │   train_pointnet.py
+   │   │   train_stacking.py
+   │   │
+   │   └───__pycache__
+   │           train_bernoulli_nb.cpython-313.pyc
+   │           train_pointnet.cpython-313.pyc
+   │
+   └───preprocessing
+          eda.py
+          prepare_all.py
+          render_views.py
