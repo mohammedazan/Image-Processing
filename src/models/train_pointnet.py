@@ -5,6 +5,25 @@ train_pointnet_dgcnn.py
 Improved training script that supports PointNet (original) or DGCNN (EdgeConv) architectures.
 - Use --arch {pointnet,dgcnn}
 - Stronger augmentations, normalization, sampler/class-weights, OneCycleLR, EMA, TTA, mixup
+
+
+Quick debug run (first 20 IDs : 
+python train_pointnet.py \
+  --data_dir data/processed/sampled \
+  --labels_csv data/splits/train.csv \
+  --out_dir experiments/pointnet_debug20 \
+  --fast --epochs 8 --batch_size 16 --npoints 1024 --seed 42 \
+  --use_class_weights --tta 2 --verbose
+
+Full run : 
+python train_pointnet.py \
+  --data_dir data/processed/sampled \
+  --labels_csv data/splits/train.csv \
+  --out_dir experiments/pointnet \
+   --epochs 400 --batch_size 32 --npoints 2048 \
+  --use_sampler --use_class_weights --normalize \
+  --label_smoothing 0.1 --tta 4 --log_every 5 --save_every 5 --no_early_stop
+
 """
 from __future__ import annotations
 import argparse, logging, os, random, json, re
