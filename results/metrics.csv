@@ -1,0 +1,2 @@
+model,accuracy,balanced_accuracy,macro_f1,n_valid,n_total,prediction_time
+pointnet,,,,0,135,0.10615801811218262

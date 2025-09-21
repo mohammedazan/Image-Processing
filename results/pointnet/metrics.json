@@ -1,0 +1,11 @@
+{
+    "accuracy": null,
+    "balanced_accuracy": null,
+    "macro_f1": null,
+    "precision": {},
+    "recall": {},
+    "n_valid": 0,
+    "n_total": 135,
+    "prediction_time": 0.10615801811218262,
+    "model_name": "pointnet"
+}

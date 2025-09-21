@@ -29,10 +29,8 @@ Usage examples:
       --fast --pretrained --batch_size 8 --workers 1 --seed 42
 
   Full run (multi-process, CPU workers recommended if many samples):
-    python mv_feature_extract.py \
-      --views_dir /content/drive/.../data/processed/views \
-      --out_dir /content/drive/.../data/processed/mv_features \
-      --pretrained --batch_size 16 --workers 4 --seed 42
+    imad = python mv_feature_extract.py  --views_dir /content/drive/.../data/processed/views  --out_dir /content/drive/.../data/processed/mv_features --pretrained --batch_size 16 --workers 4 --seed 42
+    mohammed = python mv_feature_extract.py  --views_dir ../../data/processed/views  --out_dir ../../data/processed/mv_features --pretrained --batch_size 16 --workers 4 --seed 42
 
 Notes:
  - If you request GPU (e.g. --device cuda:0) and set workers>1, the script will warn and force workers=1

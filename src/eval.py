@@ -7,7 +7,7 @@ Usage (debug / FAST mode):
 
 Full run example:
     python eval.py --model_dir ../experiments --test_csv ../data/raw/test.csv  --base_dir ../data/processed/sampled --features_dir ../data/features  --output_dir ../reports
-
+ش
 Notes:
 - The script scans subdirectories under --model_dir; each subdir is expected to contain
   a model checkpoint (.pth or .joblib/.pkl). It will try to load an optional

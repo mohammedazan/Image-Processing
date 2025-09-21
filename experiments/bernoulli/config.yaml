@@ -1,30 +1,30 @@
-{
-  "timestamp": "2025-08-31T18:23:27",
-  "args": {
-    "hu_csv": "data/processed/2d_hu/hu_features_table.csv",
-    "pca_csv": "data/processed/descriptors/descriptors_table_pca.csv",
-    "labels_csv": "../data/splits/train.csv",
-    "test_csv": null,
-    "raw_dir": "data/raw/dataverse_files",
-    "test_dir": "data/raw/Test",
-    "id_format": "class_stem",
-    "save_derived_splits": false,
-    "derived_splits_outdir": "../data/splits",
-    "dry_run": false,
-    "features": "both",
-    "binarize_method": "quantile",
-    "quantile": 0.5,
-    "binarize_strategy": "global",
-    "zscore": false,
-    "train_val_split": false,
-    "val_size": 0.2,
-    "cv_folds": 5,
-    "alpha": 1.0,
-    "alpha_grid": "0.1,0.5,1",
-    "seed": 42,
-    "fast": false,
-    "verbose": false
-  },
-  "selected_features": "both",
-  "alpha": 0.1
-}
+alpha: 0.5
+args:
+  alpha: 1.0
+  alpha_grid: 0.1,0.5,1
+  binarize_method: median
+  binarize_strategy: global
+  cv_folds: 5
+  derived_splits_outdir: ../data/splits
+  dry_run: false
+  exp_dir: null
+  fast: false
+  features: both
+  hu_csv: data/processed/2d_hu/hu_features_table.csv
+  id_format: class_stem
+  labels_csv: ../data/splits/train.csv
+  out_dir: null
+  pca_csv: data/processed/descriptors/descriptors_table_pca.csv
+  quantile: 0.5
+  raw_dir: data/raw/dataverse_files
+  res_dir: null
+  save_derived_splits: false
+  seed: 42
+  test_csv: null
+  test_dir: data/raw/Test
+  train_val_split: false
+  val_size: 0.2
+  verbose: false
+  zscore: false
+selected_features: both
+timestamp: '2025-09-20T10:56:24'
