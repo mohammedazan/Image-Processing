@@ -70,7 +70,7 @@ def load_metrics_json(p: Path) -> Optional[Dict[str, Any]]:
                 return json.load(fh)
         except Exception as e:
             logger.warning(f"Failed to read {json_path}: {e}")
-    # fallback to metrics.csv
+    # fallback to metrics. csv
     csv_path = p / "metrics.csv"
     if csv_path.exists():
         try:
