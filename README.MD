@@ -135,11 +135,11 @@ This setup provided the **best performance overall** under data imbalance.
 
 ### Visual Outputs
 
-#### 🔵 Confusion Matrix (OOF)
-![Confusion Matrix](./reports/confusion_matrix_oof.png)
-
 #### 🧠 Poster Final
 ![Poster Final](./reports/Landscape%20University%20Research%20Poster%20in%20White%20Blue%20Contemporary%20Editorial%20Style.png)
+
+#### 🔵 Confusion Matrix (OOF)
+![Confusion Matrix](./reports/confusion_matrix_oof.png)
 
 #### 📊 Code Frequency (GitHub)
 ![Code Frequency](./reports/Code%20frequency%20(1).png)
